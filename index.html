@@ -1239,7 +1239,6 @@ try{
     globalTimeBlockIndex: 0, // Global Time-Block index (monotonic across days)
     lastOOBAdaptAt: { inbTrialIndex: 0, globalTimeBlockIndex: 0 }, // Last OOB adaptation point
     oobSeries: [], // OOB adaptation series for export
-    octaveStats: { inBounds: {3:0, 4:0, 5:0}, oob: {3:0, 4:0, 5:0} }, // Octave distribution tracking
     mirrorDiffPerBlock: [] // Per-block mirror difference in percentage points
   };
 } catch(e){
@@ -1320,7 +1319,13 @@ state.timeBlockIndex ??= (state.minutesToday % 30) / 6 + 1; // 1-5 within day
 state.globalTimeBlockIndex ??= Math.floor((state.minutesToday || 0) / 6);
 state.lastOOBAdaptAt ??= { inbTrialIndex: 0, globalTimeBlockIndex: 0 };
 state.oobSeries ??= [];
-state.octaveStats ??= { inBounds: {3:0, 4:0, 5:0}, oob: {3:0, 4:0, 5:0} };
+// Preserve existing octaveStats structure and add unified tracking fields
+if (!state.octaveStats || typeof state.octaveStats !== 'object') {
+  state.octaveStats = { inBounds: {3:0, 4:0, 5:0}, oob: {3:0, 4:0, 5:0} };
+} else {
+  state.octaveStats.inBounds ??= {3:0, 4:0, 5:0};
+  state.octaveStats.oob ??= {3:0, 4:0, 5:0};
+}
 state.mirrorDiffPerBlock ??= [];
 
 save();
