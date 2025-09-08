@@ -671,16 +671,16 @@ function adaptOOBTarget() {
   }
   
   const observedAcc = last60InBounds.filter(t => t.correct).length / last60InBounds.length;
-  const observedAcc60 = Math.round(observedAcc * 100);
+  const last60Acc = parseFloat(observedAcc.toFixed(3)); // Store as fraction 0..1
   
   let newTarget = state.oobStats.adaptiveRate ?? 0.18;
   let reason = 'no-change';
   
   // Target policy: nudge toward 70-85% overall accuracy using ±3pp steps
-  if (observedAcc60 < 70) {
+  if (observedAcc < 0.70) {
     newTarget = Math.max(0.05, newTarget - 0.03); // Decrease OOB rate to make easier
     reason = 'accuracy-too-low';
-  } else if (observedAcc60 > 85) {
+  } else if (observedAcc > 0.85) {
     newTarget = Math.min(0.35, newTarget + 0.03); // Increase OOB rate to make harder
     reason = 'accuracy-too-high';
   }
@@ -688,21 +688,32 @@ function adaptOOBTarget() {
   // Clamp to 5-35% range
   newTarget = Math.max(0.05, Math.min(0.35, newTarget));
   
-  // F) OOB TARGET CADENCE & UNITS - Record the adaptation in oobSeries as FRACTION
+  // Calculate observed OOB percentage in current time block (for observedPctThisBlock)
+  const currentBlockTrials = state.trials.filter(t => {
+    // Approximate current block trials (this could be refined with better time tracking)
+    return t.time && t.time > (Date.now() - BLOCK_LEN_MIN * 60 * 1000);
+  });
+  const currentBlockOOB = currentBlockTrials.filter(t => t.oob);
+  const observedPctThisBlock = currentBlockTrials.length > 0 ? 
+    parseFloat((currentBlockOOB.length / currentBlockTrials.length).toFixed(3)) : 0;
+  
+  // Record the adaptation in oobSeries per problem statement format
   if (!state.oobSeries) state.oobSeries = [];
   state.oobSeries.push({
-    blockIndex: state.levelIndex,
-    observedAcc60: observedAcc60,
+    globalTimeBlockIndex: state.globalTimeBlockIndex,
     targetPct: parseFloat(newTarget.toFixed(3)), // Store as fraction 0..1
-    reason: reason,
-    timestamp: Date.now()
+    last60Acc: last60Acc, // Store as fraction 0..1
+    observedPctThisBlock: observedPctThisBlock // Fraction 0..1
   });
   
-  // Add debug logging as requested
-  const currentBlock = blockFromIndex(state.levelIndex);
-  console.log(`OOB_ADAPT block=${currentBlock} last60_acc=${observedAcc60}% new_target=${Math.round(newTarget * 100)}%`);
-  
+  // Freeze the new target for the next Time-Block
   state.oobStats.adaptiveRate = newTarget;
+  state.oobStats.adaptationCount = (state.oobStats.adaptationCount || 0) + 1;
+  
+  // Add debug logging
+  const currentBlock = blockFromIndex(state.levelIndex);
+  console.log(`OOB_ADAPT globalTimeBlock=${state.globalTimeBlockIndex} last60_acc=${Math.round(last60Acc*100)}% new_target=${Math.round(newTarget * 100)}%`);
+  
   save();
 }
 
@@ -1219,7 +1230,16 @@ try{
     confusionMatrix: {}, // 12x12 confusion tracking
     noteStats: {}, // Per-note rolling statistics
     varietyModeEnabled: false, // Timbre variety mode
-    minutesToday: 0 // Track minutes completed today in 6-minute blocks
+    minutesToday: 0, // Track minutes completed today in 6-minute blocks
+    // Unified cadence tracking per glossary
+    trialIndex: 0, // Total trials (all types)
+    inbTrialIndex: 0, // In-bounds graded trials only
+    qBlockIndex: 0, // Q-Block index (every 20 in-bounds trials)
+    timeBlockIndex: 0, // Time-Block index within day (1..5)
+    globalTimeBlockIndex: 0, // Global Time-Block index (monotonic across days)
+    lastOOBAdaptAt: { inbTrialIndex: 0, globalTimeBlockIndex: 0 }, // Last OOB adaptation point
+    oobSeries: [], // OOB adaptation series for export
+    mirrorDiffPerBlock: [] // Per-block mirror difference in percentage points
   };
 } catch(e){
   state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
@@ -1290,6 +1310,23 @@ state.curriculum.events ??= [];       // Scheduler events
 
 // E) RECALL SUMMARIES - Initialize enhanced recall tracking
 state.recall ??= {};                  // Per-day recall results
+
+// F) UNIFIED CADENCE TRACKING - Initialize new tracking fields
+state.trialIndex ??= state.trials?.length || 0;
+state.inbTrialIndex ??= state.trials?.filter(t => !t.oob && t.correct !== undefined).length || 0;
+state.qBlockIndex ??= Math.floor(state.inbTrialIndex / 20) + (state.inbTrialIndex > 0 ? 1 : 0);
+state.timeBlockIndex ??= (state.minutesToday % 30) / 6 + 1; // 1-5 within day
+state.globalTimeBlockIndex ??= Math.floor((state.minutesToday || 0) / 6);
+state.lastOOBAdaptAt ??= { inbTrialIndex: 0, globalTimeBlockIndex: 0 };
+state.oobSeries ??= [];
+// Preserve existing octaveStats structure and add unified tracking fields
+if (!state.octaveStats || typeof state.octaveStats !== 'object') {
+  state.octaveStats = { inBounds: {3:0, 4:0, 5:0}, oob: {3:0, 4:0, 5:0} };
+} else {
+  state.octaveStats.inBounds ??= {3:0, 4:0, 5:0};
+  state.octaveStats.oob ??= {3:0, 4:0, 5:0};
+}
+state.mirrorDiffPerBlock ??= [];
 
 save();
 
@@ -3468,6 +3505,15 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
   
+  // Update unified tracking counters per glossary
+  state.trialIndex++; // Increment for all trials
+  const isGradedInBounds = !isOOBTrial && !timeout; // Only graded in-bounds trials count
+  if (isGradedInBounds) {
+    state.inbTrialIndex++;
+    // Update Q-Block index: floor(inbTrialIndex/20)+1
+    state.qBlockIndex = Math.floor(state.inbTrialIndex / 20) + 1;
+  }
+  
   // B) BOUNDARY PROBE RATE - Enhanced trial data with required fields
   const trialData = {
     note: currentNote,
@@ -3497,6 +3543,15 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   };
   
   state.trials.push(trialData);
+  
+  // Update octave statistics per glossary
+  if (trialData.oct && (trialData.oct === 3 || trialData.oct === 4 || trialData.oct === 5)) {
+    if (isOOBTrial) {
+      state.octaveStats.oob[trialData.oct]++;
+    } else {
+      state.octaveStats.inBounds[trialData.oct]++;
+    }
+  }
   
   // Update detune type running totals
   updateDetuneShares(trialData);
@@ -3529,18 +3584,6 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   
   // Validate OOB state
   validateOOBState();
-  
-  // Track OOB time-series at block boundaries (every 40 trials)
-  if (state.levelTrials % 40 === 0) {
-    trackBlockEndOOBSeries(block);
-    
-    // Run adaptation at block end, only every 3 blocks with guards
-    if (shouldAdaptAtBlockEnd(block)) {
-      adaptOOBTarget();
-      state.oobStats.adaptationCount++;
-      state.oobStats.lastAdaptedBlock = block;
-    }
-  }
   
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
@@ -3604,31 +3647,9 @@ function advanceCheck(){
   }
   state.levelTrials=0; state.levelCorrect=0;
   
-  // Track completed 6-minute block
+  // Track completed 6-minute block and handle time-block transitions
   if(passed) {
-    state.minutesToday += BLOCK_LEN_MIN;
-  }
-  
-  // C) ADAPT OOB% ONLY AT BLOCK BOUNDARIES (every 3 blocks), using last 60 in-bounds
-  if(passed && block % 3 === 0) {
-    const last60 = (state.trials || []).filter(t => !t.oob).slice(-60);
-    if (last60.length >= 30) {
-      const acc = last60.reduce((a,t)=>a+(t.correct?1:0),0) / last60.length;
-      let r = state.oobStats.adaptiveRate ?? 0.18;
-      // Target 70–85% overall accuracy:
-      if (acc > 0.85)      r = Math.min(0.35, r + 0.03); // +3pp harder
-      else if (acc < 0.70) r = Math.max(0.05, r - 0.03); // -3pp easier
-      state.oobStats.adaptiveRate = r;
-    }
-    state.oobStats.streakCount = 0; // reset at block boundary
-    
-    // Update health check block countdown
-    if (state.oobStats.healthCheckActive && state.oobStats.healthCheckBlocks > 0) {
-      state.oobStats.healthCheckBlocks--;
-      if (state.oobStats.healthCheckBlocks <= 0) {
-        state.oobStats.healthCheckActive = false;
-      }
-    }
+    endTimeBlock();
   }
 
   if(passed && state.levelIndex<LEVELS_TOTAL){
@@ -3642,6 +3663,81 @@ function advanceCheck(){
       showNewPitchModal(newSet);
     }
   } else save();
+}
+
+/* ------------------ TIME-BLOCK MANAGEMENT ------------------ */
+function endTimeBlock() {
+  // Update time-block counters per glossary
+  state.minutesToday += BLOCK_LEN_MIN;
+  state.globalTimeBlockIndex++;
+  state.timeBlockIndex = ((state.minutesToday - BLOCK_LEN_MIN) % 30) / 6 + 1; // 1-5 within day
+  
+  // Compute OOB octave mirroring at Time-Block START from last completed in-bounds window
+  computeOOBOctaveMirroring();
+  
+  // adaptOOBTarget() ONLY in endTimeBlock(), and only when specified conditions met
+  const shouldAdapt = (state.globalTimeBlockIndex % 3 === 0) || 
+                      (state.inbTrialIndex - state.lastOOBAdaptAt.inbTrialIndex >= 60);
+  
+  if (shouldAdapt) {
+    adaptOOBTarget();
+    state.lastOOBAdaptAt.inbTrialIndex = state.inbTrialIndex;
+    state.lastOOBAdaptAt.globalTimeBlockIndex = state.globalTimeBlockIndex;
+  }
+  
+  // Reset OOB streak at block boundary
+  state.oobStats.streakCount = 0;
+  
+  // Update health check block countdown
+  if (state.oobStats.healthCheckActive && state.oobStats.healthCheckBlocks > 0) {
+    state.oobStats.healthCheckBlocks--;
+    if (state.oobStats.healthCheckBlocks <= 0) {
+      state.oobStats.healthCheckActive = false;
+    }
+  }
+  
+  save();
+}
+
+function computeOOBOctaveMirroring() {
+  // Compute octave mirroring once at Time-Block START from last completed in-bounds window
+  const last60InBounds = state.trials.filter(t => !t.oob && t.correct !== undefined).slice(-60);
+  
+  if (last60InBounds.length === 0) {
+    // No in-bounds data, fall back to center-only and skip mirror logging
+    return;
+  }
+  
+  // Calculate octave distribution from last 60 in-bounds trials
+  const octaveCounts = { 3: 0, 4: 0, 5: 0 };
+  last60InBounds.forEach(trial => {
+    if (trial.oct && octaveCounts[trial.oct] !== undefined) {
+      octaveCounts[trial.oct]++;
+    }
+  });
+  
+  const total = octaveCounts[3] + octaveCounts[4] + octaveCounts[5];
+  if (total === 0) return;
+  
+  // Calculate percentages
+  const oct3Pct = (octaveCounts[3] / total) * 100;
+  const oct4Pct = (octaveCounts[4] / total) * 100;
+  const oct5Pct = (octaveCounts[5] / total) * 100;
+  
+  // Calculate mirror difference (how much it deviates from even distribution)
+  const evenPct = 100 / 3; // ~33.33%
+  const mirrorDiff = Math.max(
+    Math.abs(oct3Pct - evenPct),
+    Math.abs(oct4Pct - evenPct),
+    Math.abs(oct5Pct - evenPct)
+  );
+  
+  // Store per-block mirror difference
+  state.mirrorDiffPerBlock.push({
+    globalTimeBlockIndex: state.globalTimeBlockIndex,
+    mirrorDiff_pp: parseFloat(mirrorDiff.toFixed(1)),
+    octaveDistribution: { 3: oct3Pct, 4: oct4Pct, 5: oct5Pct }
+  });
 }
 
 /* ------------------ SESSION ------------------ */
@@ -5605,32 +5701,61 @@ window.QA.exportFull = function(cfg = {}) {
       days: days, 
       seed: cfg.seed || null 
     },
+    // Unified cadence counters per glossary
+    counters: {
+      trialIndex: state.trialIndex || 0,
+      inbTrialIndex: state.inbTrialIndex || 0,
+      qBlockIndex: state.qBlockIndex || 0,
+      timeBlockIndex: state.timeBlockIndex || 0,
+      globalTimeBlockIndex: state.globalTimeBlockIndex || 0,
+      lastOOBAdaptAt: state.lastOOBAdaptAt || { inbTrialIndex: 0, globalTimeBlockIndex: 0 }
+    },
     counts: { 
       tones: state.trials.length, 
       trials: state.trials.length,
       last40InBounds: last40InBounds.length
     },
     oob: { 
-      // Enhanced OOB time-series from qa.oob.series
-      series: state.qa?.oob?.series || [], 
+      // OOB series as per problem statement: [{ globalTimeBlockIndex, targetPct(0..1), last60Acc, observedPctThisBlock }]
+      series: state.oobSeries || [], 
       observedPct: observedPct, 
       maxStreak: maxStreak, 
       last60Acc: last60Acc 
     },
     octaves: { 
-      // Enhanced octave tracking from qa.octaves
-      inBounds: state.qa?.octaves?.inBounds || { 3: 0, 4: 0, 5: 0 }, 
-      oob: state.qa?.octaves?.oob || { 3: 0, 4: 0, 5: 0 }, 
-      mirrorCheck: state.qa?.octaves?.mirrorCheck || []
+      // Octaves: inBounds {3,4,5}, OOB {3,4,5}, and per-block mirrorDiff_pp
+      inBounds: state.octaveStats?.inBounds || { 3: 0, 4: 0, 5: 0 }, 
+      oob: state.octaveStats?.oob || { 3: 0, 4: 0, 5: 0 }, 
+      mirrorDiffPerBlock: state.mirrorDiffPerBlock || []
     },
     detune: { 
-      shares: detuneShares
+      shares: detuneShares,
+      // Detune per tone: { pc, oct, detuneMode:anchor|jitter|probe|oob, cents:number, JL:number }
+      perTone: state.trials.map(t => ({
+        pc: t.pc || t.truePc,
+        oct: t.oct,
+        detuneMode: t.detuneMode,
+        cents: t.cents || 0,
+        JL: t.jlLevel || 0
+      })).filter(t => t.pc) // Only include trials with valid PC
     },
     jitter: { 
       // Current JL per pitch and level events with timestamps/reasons
       levels: state.jitterLevels || {}, 
       perPitch: byPitchJitterLevels,
-      levelEvents: state.jitter?.levelEvents || [] 
+      levelEvents: state.jitter?.levelEvents || [],
+      // JL events with window metrics; jitter.byPitch snapshot (anchors/probes/jitter shares from last-40)
+      windowMetrics: byPitchJitterLevels.map(p => ({
+        pc: p.pc,
+        JL: p.JL,
+        windowN: p.windowN,
+        anchorsShare: p.anchorsPct,
+        probesShare: p.probesPct,
+        jitterShare: p.jitterPct,
+        accuracy: p.acc,
+        medianCents: p.medianCents,
+        sdCents: p.sdCents
+      }))
     },
     curriculum: {
       // Current active pitch classes and selection weights at block boundaries
