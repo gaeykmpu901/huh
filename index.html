@@ -579,39 +579,39 @@ function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
 
 /* ------------------ JITTER LADDER SYSTEM ------------------ */
-// Jitter level configurations (JL0 = easiest, JL3 = hardest)
+// B) BOUNDARY PROBE RATE - Jitter level configurations (JL0 = easiest, JL3 = hardest)
 const JITTER_LEVELS = {
   0: { // JL0 - onboarding/new timbre
     jitterRange: [3, 8],    // ±3-8¢
-    anchorRate: 0.30,       // ≥30% anchors
-    probeRate: 0.08,        // 8% probes (increased from 2%)
+    anchorRate: 0.275,      // 25-30% anchors 
+    probeRate: 0.03,        // 2-4% probes
     name: 'JL0'
   },
   1: { // JL1 - early
     jitterRange: [5, 10],   // ±5-10¢
-    anchorRate: 0.175,      // ~15-20% anchors
-    probeRate: 0.09,        // 9% probes
+    anchorRate: 0.175,      // 15-20% anchors
+    probeRate: 0.065,       // 5-8% probes
     name: 'JL1'
   },
   2: { // JL2 - mid
     jitterRange: [5, 15],   // ±5-15¢
-    anchorRate: 0.125,      // ~10-15% anchors
-    probeRate: 0.10,        // 10% probes
+    anchorRate: 0.125,      // 10-15% anchors
+    probeRate: 0.09,        // 8-10% probes
     name: 'JL2'
   },
   3: { // JL3 - hardest
     jitterRange: [5, 15],   // ±5-15¢
-    anchorRate: 0.075,      // ~5-10% anchors
-    probeRate: 0.12,        // 12% probes
+    anchorRate: 0.075,      // 5-10% anchors
+    probeRate: 0.11,        // 10-12% probes
     name: 'JL3'
   }
 };
 
-// Promotion/demotion thresholds
+// C) JITTER LADDER LOGGING - Promotion/demotion thresholds
 const JITTER_PROMOTION_RULES = {
-  '0to1': { accuracy: 0.75, medianCents: 20 },   // JL0→JL1
-  '1to2': { accuracy: 0.80, medianCents: 15 },   // JL1→JL2  
-  '2to3': { accuracy: 0.90, medianCents: 10, sdCents: 15 }  // JL2→JL3
+  '0to1': { accuracy: 0.75, medianCents: 20 },   // JL0→JL1 when acc ≥ .75 AND median ≤ 20¢
+  '1to2': { accuracy: 0.80, medianCents: 15 },   // JL1→JL2 when acc ≥ .80 AND median ≤ 15¢
+  '2to3': { accuracy: 0.90, medianCents: 10, sdCents: 15 }  // JL2→JL3 when acc ≥ .90 AND median ≤ 10¢ AND SD ≤ 15¢
 };
 
 const JITTER_DEMOTION_RULES = {
@@ -690,12 +690,12 @@ function adaptOOBTarget() {
   // Clamp to 5-35% range
   newTarget = Math.max(0.05, Math.min(0.35, newTarget));
   
-  // Record the adaptation in oobSeries
+  // F) OOB TARGET CADENCE & UNITS - Record the adaptation in oobSeries as FRACTION
   if (!state.oobSeries) state.oobSeries = [];
   state.oobSeries.push({
     blockIndex: state.levelIndex,
     observedAcc60: observedAcc60,
-    newTarget: Math.round(newTarget * 100),
+    targetPct: parseFloat(newTarget.toFixed(3)), // Store as fraction 0..1
     reason: reason,
     timestamp: Date.now()
   });
@@ -841,7 +841,7 @@ function updateNoteStats(pc, correct, jitterCents) {
   save();
 }
 
-// Check for jitter level promotion
+// C) JITTER LADDER LOGGING - Check for jitter level promotion
 function checkJitterPromotion(pc) {
   initializeJitterLevel(pc);
   initializeNoteStats(pc);
@@ -856,21 +856,21 @@ function checkJitterPromotion(pc) {
   let newLevel = currentLevel;
   
   if (currentLevel === 0) {
-    // JL0 → JL1
+    // JL0 → JL1 when acc ≥ .75 AND median ≤ 20¢
     const rule = JITTER_PROMOTION_RULES['0to1'];
     if (stats.accuracy >= rule.accuracy && stats.medianError <= rule.medianCents) {
       canPromote = true;
       newLevel = 1;
     }
   } else if (currentLevel === 1) {
-    // JL1 → JL2
+    // JL1 → JL2 when acc ≥ .80 AND median ≤ 15¢
     const rule = JITTER_PROMOTION_RULES['1to2'];
     if (stats.accuracy >= rule.accuracy && stats.medianError <= rule.medianCents) {
       canPromote = true;
       newLevel = 2;
     }
   } else if (currentLevel === 2) {
-    // JL2 → JL3
+    // JL2 → JL3 when acc ≥ .90 AND median ≤ 10¢ AND SD ≤ 15¢
     const rule = JITTER_PROMOTION_RULES['2to3'];
     if (stats.accuracy >= rule.accuracy && 
         stats.medianError <= rule.medianCents && 
@@ -883,20 +883,30 @@ function checkJitterPromotion(pc) {
   if (canPromote) {
     state.jitterLevels[pc] = newLevel;
     
-    // Record promotion event
+    // Record promotion event in new format
+    const currentDay = Math.floor((Date.now() - (state.startDate || Date.now())) / (24 * 60 * 60 * 1000)) + 1;
+    const currentBlock = blockFromIndex(state.levelIndex);
+    
     const event = {
-      timestamp: Date.now(),
-      fromLevel: currentLevel,
-      toLevel: newLevel,
-      accuracy: stats.accuracy,
-      medianError: stats.medianError,
-      sdError: stats.sdError
+      day: currentDay,
+      block: currentBlock,
+      pc: pc,
+      from: currentLevel,
+      to: newLevel,
+      acc: parseFloat(stats.accuracy.toFixed(3)),
+      medianCents: parseFloat(stats.medianError.toFixed(1)),
+      sdCents: parseFloat(stats.sdError.toFixed(1)),
+      windowN: stats.trials.length
     };
-    state.promotionEvents[pc].push(event);
+    state.jitter.levelEvents.push(event);
     
     // Update jitter range used
     const config = JITTER_LEVELS[newLevel];
     state.jitterRangeUsed[pc] = `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`;
+    
+    save();
+  }
+}
     
     console.log(`JITTER_LEVEL pc=${pc} from JL${currentLevel}→JL${newLevel} (acc=${(stats.accuracy*100).toFixed(0)}%, median=${stats.medianError.toFixed(0)}¢, SD=${stats.sdError.toFixed(0)}¢)`);
     save();
@@ -913,12 +923,12 @@ function checkJitterDemotion(pc) {
   
   if (currentLevel === 0 || stats.trials.length < 15) return; // Can't demote from JL0, need data
   
-  // Use last 20 trials for demotion check
+  // Use last ~20 trials for demotion check
   const recentTrials = stats.trials.slice(-20);
   if (recentTrials.length < 15) return;
   
   const recentAcc = recentTrials.filter(t => t.correct).length / recentTrials.length;
-  const recentErrors = recentTrials.map(t => t.jitterCents);
+  const recentErrors = recentTrials.map(t => Math.abs(t.cents || 0));
   recentErrors.sort((a, b) => a - b);
   const recentMedian = recentErrors[Math.floor(recentErrors.length / 2)] || 0;
   const recentMean = recentErrors.reduce((a, b) => a + b, 0) / recentErrors.length;
@@ -926,6 +936,7 @@ function checkJitterDemotion(pc) {
   const recentSD = Math.sqrt(recentVariance);
   
   const rules = JITTER_DEMOTION_RULES;
+  // Demote one level if acc < .75 OR median > 25¢ OR SD > 30¢ (over last ~20)
   const shouldDemote = recentAcc < rules.accuracy || 
                        recentMedian > rules.medianCents || 
                        recentSD > rules.sdCents;
@@ -934,53 +945,79 @@ function checkJitterDemotion(pc) {
     const newLevel = Math.max(0, currentLevel - 1);
     state.jitterLevels[pc] = newLevel;
     
-    // Record demotion event
+    // Record demotion event in new format
+    const currentDay = Math.floor((Date.now() - (state.startDate || Date.now())) / (24 * 60 * 60 * 1000)) + 1;
+    const currentBlock = blockFromIndex(state.levelIndex);
+    
     const event = {
-      timestamp: Date.now(),
-      fromLevel: currentLevel,
-      toLevel: newLevel,
-      accuracy: recentAcc,
-      medianError: recentMedian,
-      sdError: recentSD
+      day: currentDay,
+      block: currentBlock,
+      pc: pc,
+      from: currentLevel,
+      to: newLevel,
+      acc: parseFloat(recentAcc.toFixed(3)),
+      medianCents: parseFloat(recentMedian.toFixed(1)),
+      sdCents: parseFloat(recentSD.toFixed(1)),
+      windowN: recentTrials.length
     };
-    state.demotionEvents[pc].push(event);
+    state.jitter.levelEvents.push(event);
     
     // Update jitter range used
     const config = JITTER_LEVELS[newLevel];
     state.jitterRangeUsed[pc] = `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`;
+    
+    save();
+  }
+}
     
     console.log(`JITTER_LEVEL pc=${pc} from JL${currentLevel}→JL${newLevel} (acc=${(recentAcc*100).toFixed(0)}%, median=${recentMedian.toFixed(0)}¢, SD=${recentSD.toFixed(0)}¢)`);
     save();
   }
 }
 
-// Check if note needs rescue mode (poor performance)
+// B) BOUNDARY PROBE RATE - Check if note needs rescue mode (poor performance)
 function needsRescueMode(pc) {
   initializeNoteStats(pc);
   const stats = state.noteStats[pc];
   
   if (!stats || stats.trials.length < 10) return false; // Need some data
   
-  // Check rolling accuracy and median error for last 20 trials
-  const recentTrials = stats.trials.slice(-20);
+  // Check rolling accuracy and median error for last 40 trials
+  const recentTrials = stats.trials.slice(-40);
+  if (recentTrials.length < 20) return false; // Need at least 20 trials
+  
   const recentCorrect = recentTrials.filter(t => t.correct).length;
   const recentAcc = recentCorrect / recentTrials.length;
   
-  const errors = recentTrials.map(t => t.jitterCents);
-  errors.sort((a, b) => a - b);
-  const medianError = errors[Math.floor(errors.length / 2)];
+  // Calculate median and SD of absolute error
+  const recentErrors = recentTrials.map(t => Math.abs(t.cents || 0));
+  recentErrors.sort((a, b) => a - b);
+  const medianError = recentErrors[Math.floor(recentErrors.length / 2)];
   
-  return recentAcc < 0.75 || medianError > 25;
+  const meanError = recentErrors.reduce((sum, e) => sum + e, 0) / recentErrors.length;
+  const variance = recentErrors.reduce((sum, e) => sum + Math.pow(e - meanError, 2), 0) / recentErrors.length;
+  const sdError = Math.sqrt(variance);
+  
+  // "Rescue" rule: if rolling last-40 acc < 0.75 OR median abs cents > 25¢ OR SD > 30¢
+  return recentAcc < 0.75 || medianError > 25 || sdError > 30;
 }
 
 // Get rescue mode config for a note
 function getRescueConfig(pc) {
   if (!needsRescueMode(pc)) return null;
   
+  // Temporarily drop one JL level and clamp probes to ≤4%
+  const currentLevel = state.jitterLevels[pc] || 0;
+  const rescueLevel = Math.max(0, currentLevel - 1);
+  const rescueConfig = JITTER_LEVELS[rescueLevel];
+  
   return {
-    jitterRange: [3, 8], // Temporarily shrink to ±3-8¢
-    probeRate: 0.03,     // Reduce probes to 3%
-    anchorRate: 0.40     // Increase anchors to 40%
+    jitterRange: rescueConfig.jitterRange,
+    probeRate: Math.min(0.04, rescueConfig.probeRate), // Clamp probes to ≤4%
+    anchorRate: rescueConfig.anchorRate,
+    isRescue: true,
+    originalLevel: currentLevel,
+    rescueLevel: rescueLevel
   };
 }
 
@@ -1241,7 +1278,29 @@ state.oobStats.streakCount ??= 0;     // generation streak
 if (typeof state.oobStats.adaptiveRate !== 'number') state.oobStats.adaptiveRate = 0.18; // 18%
 state.oobStats.maxInRow = 2;          // streak cap
 state.oobSeries ??= [];               // OOB adaptation log
+
+// A) OOB OCTAVE MIRRORING - Initialize tracking
+state.oobOctaveMirror ??= [];         // Block-by-block octave mirroring data
+
+// C) JITTER LADDER LOGGING - Initialize enhanced jitter tracking  
+state.jitterLevels ??= {};            // Per-pitch jitter levels (JL0-JL3) - numeric
+state.jitter ??= {};
+state.jitter.levelEvents ??= [];      // Promotion/demotion events
+state.jitter.byPitch ??= {};          // Daily snapshots per pitch
+
+// D) CURRICULUM/SCHEDULER LOGGING - Initialize tracking
+state.curriculum ??= {};
+state.curriculum.active ??= [];       // Active pitches array
+state.curriculum.weights ??= {};      // Pitch weights (fractions)
+state.curriculum.events ??= [];       // Scheduler events
+
+// E) RECALL SUMMARIES - Initialize enhanced recall tracking
+state.recall ??= {};                  // Per-day recall results
+
 save();
+
+// Global variables for trial tracking
+let trialStartTime = 0; // Track trial start time for RT measurement
 
 // Apply theme on load
 applyTheme(state.theme);
@@ -1525,11 +1584,20 @@ async function playFlappySound(){
 function selectInBoundsNote(usableNotes) {
   if (usableNotes.length === 0) return 'F'; // Fallback
   
+  // D) CURRICULUM/SCHEDULER LOGGING - Update active pitches
+  updateCurriculumState(usableNotes);
+  
   // Use new weight calculation system
   const weights = calculateSelectionWeights(usableNotes);
   
-  // Weighted random selection
+  // D) CURRICULUM/SCHEDULER LOGGING - Store current weights (fractions)
   const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0);
+  state.curriculum.weights = {};
+  usableNotes.forEach(note => {
+    state.curriculum.weights[note] = totalWeight > 0 ? weights[note] / totalWeight : 1.0 / usableNotes.length;
+  });
+  
+  // Weighted random selection
   let random = Math.random() * totalWeight;
   
   let selectedNote = null;
@@ -1549,6 +1617,27 @@ function selectInBoundsNote(usableNotes) {
   logWeightsTrace(usableNotes, selectedNote);
   
   return selectedNote;
+}
+
+// D) CURRICULUM/SCHEDULER LOGGING - Update curriculum state
+function updateCurriculumState(usableNotes) {
+  // Update active pitches
+  state.curriculum.active = [...usableNotes].sort();
+  
+  // Check for new pitches being added
+  const currentDay = Math.floor((Date.now() - (state.startDate || Date.now())) / (24 * 60 * 60 * 1000)) + 1;
+  const previousActive = state.curriculum.previousActive || [];
+  
+  const newPitches = usableNotes.filter(note => !previousActive.includes(note));
+  newPitches.forEach(note => {
+    state.curriculum.events.push({
+      day: currentDay,
+      type: "addPitch",
+      details: { pitch: note, totalActive: usableNotes.length }
+    });
+  });
+  
+  state.curriculum.previousActive = [...usableNotes];
 }
 
 /* ------------------ CONFUSION MATRIX & SCHEDULING ------------------ */
@@ -1635,6 +1724,9 @@ function calculateSelectionWeights(usableNotes) {
   const weakNotes = getWeakNotes().map(w => w.note);
   const confusionPairs = getConfusionPairs();
   
+  // D) CURRICULUM/SCHEDULER LOGGING - Check for boost events
+  const currentDay = Math.floor((Date.now() - (state.startDate || Date.now())) / (24 * 60 * 60 * 1000)) + 1;
+  
   // Create weighted selection
   const weights = {};
   const baseWeight = 1; // Minimum weight for all notes
@@ -1645,16 +1737,43 @@ function calculateSelectionWeights(usableNotes) {
   });
   
   // Boost weight for weak notes
-  weakNotes.forEach(note => {
-    if (weights[note] !== undefined) {
-      weights[note] += 2; // +2 weight for weak notes
-    }
-  });
+  if (weakNotes.length > 0) {
+    weakNotes.forEach(note => {
+      if (weights[note] !== undefined) {
+        weights[note] += 2; // +2 weight for weak notes
+      }
+    });
+    
+    // Log boostWeak event
+    state.curriculum.events.push({
+      day: currentDay,
+      type: "boostWeak",
+      details: { pitches: weakNotes, boost: 2.0 }
+    });
+  }
   
   // Boost weight for notes in top confusion pairs
   confusionPairs.forEach(pair => {
     if (weights[pair.truePc] !== undefined) {
       weights[pair.truePc] += 1.5; // +1.5 weight for confusion targets
+      
+      // Check if this confusion pair accounts for ≥20% of the pitch's errors
+      const pitchErrors = getPitchErrorRate(pair.truePc);
+      const confusionRate = pair.rate || 0;
+      
+      if (confusionRate >= 0.20) {
+        // Log boostConfusion event and increase weight modestly for 1 block
+        state.curriculum.events.push({
+          day: currentDay,
+          type: "boostConfusion",
+          details: { 
+            truePc: pair.truePc, 
+            guessPc: pair.guessPc, 
+            confusionRate: confusionRate,
+            temporaryBoost: 1.5 
+          }
+        });
+      }
     }
   });
   
@@ -1676,6 +1795,56 @@ function getWeakNotes() {
     .sort((a, b) => a.accuracy - b.accuracy);
   
   return weakNotes.slice(0, 3); // Top 3 weak notes
+}
+
+// D) CURRICULUM/SCHEDULER LOGGING - Get pitch error rate for confusion analysis
+function getPitchErrorRate(truePc) {
+  if (!state.confusionMatrix || !state.confusionMatrix[truePc]) return 0;
+  
+  const pitchData = state.confusionMatrix[truePc];
+  const totalErrors = Object.values(pitchData).reduce((sum, count) => sum + count, 0);
+  const correctCount = pitchData[truePc] || 0;
+  const incorrectCount = totalErrors - correctCount;
+  
+  return totalErrors > 0 ? incorrectCount / totalErrors : 0;
+}
+
+// C) JITTER LADDER LOGGING - Generate daily pitch snapshots
+function generateDailyJitterSnapshot() {
+  const currentDay = Math.floor((Date.now() - (state.startDate || Date.now())) / (24 * 60 * 60 * 1000)) + 1;
+  
+  // Only generate once per day
+  if (state.jitter.lastSnapshotDay === currentDay) return;
+  
+  state.jitter.byPitch = {}; // Reset daily snapshot
+  
+  PC.forEach(pc => {
+    initializeJitterLevel(pc);
+    initializeNoteStats(pc);
+    
+    const level = state.jitterLevels[pc];
+    const config = JITTER_LEVELS[level];
+    const stats = state.noteStats[pc];
+    
+    // Calculate shares
+    const anchorsPct = parseFloat((config.anchorRate).toFixed(3));
+    const probesPct = parseFloat((config.probeRate).toFixed(3));
+    const jitterPct = parseFloat((1.0 - config.anchorRate - config.probeRate).toFixed(3));
+    
+    state.jitter.byPitch[pc] = {
+      JL: level,
+      anchorsPct: anchorsPct,
+      probesPct: probesPct,
+      jitterPct: jitterPct,
+      jitterRange: `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`,
+      acc: stats.trials.length > 0 ? parseFloat(stats.accuracy.toFixed(3)) : null,
+      medianCents: stats.trials.length > 0 ? parseFloat(stats.medianError.toFixed(1)) : null,
+      sdCents: stats.trials.length > 0 ? parseFloat(stats.sdError.toFixed(1)) : null
+    };
+  });
+  
+  state.jitter.lastSnapshotDay = currentDay;
+  save();
 }
 
 function updateJitterStatusUI(set) {
@@ -2279,24 +2448,89 @@ function getInBoundsOctaveDistribution(windowSize = 40) {
   return distribution;
 }
 
+// A) OOB OCTAVE MIRRORING - Get in-bounds octave mix for current block
+function getInBoundsOctaveMixForBlock() {
+  // Get current block trials (in-bounds only)
+  const currentBlock = blockFromIndex(state.levelIndex);
+  const blockTrials = state.trials.filter(t => 
+    !t.oob && 
+    t.block === currentBlock
+  );
+  
+  const counts = { 3: 0, 4: 0, 5: 0 };
+  
+  blockTrials.forEach(trial => {
+    if (trial.note) {
+      const octave = parseInt(trial.note.slice(-1));
+      if (octave >= 3 && octave <= 5) {
+        counts[octave]++;
+      }
+    }
+  });
+  
+  // Convert to fractions
+  const total = counts[3] + counts[4] + counts[5];
+  const fractions = { 3: 0, 4: 0, 5: 0 };
+  
+  if (total > 0) {
+    fractions[3] = counts[3] / total;
+    fractions[4] = counts[4] / total;
+    fractions[5] = counts[5] / total;
+  } else {
+    // Default distribution if no data
+    fractions[3] = 0.15;
+    fractions[4] = 0.7;
+    fractions[5] = 0.15;
+  }
+  
+  return fractions;
+}
+
 // Select octave for OOB note, mirroring in-bounds distribution
 function selectOctaveForOOBNote(note) {
-  const inBoundsDistribution = getInBoundsOctaveDistribution();
+  // Use block-based octave mirroring
+  const inBoundsDistribution = getInBoundsOctaveMixForBlock();
   
-  // If no in-bounds data, fall back to standard distribution
-  if (inBoundsDistribution[3] + inBoundsDistribution[4] + inBoundsDistribution[5] === 0) {
-    return selectOctaveForNote(note);
-  }
+  // Respect gating - don't sample octaves that aren't unlocked yet
+  const unlockedOctaves = currentOctaves ? currentOctaves() : [3, 4, 5];
   
-  // Sample according to in-bounds proportions
-  const rand = Math.random();
-  if (rand < inBoundsDistribution[3]) {
-    return 3;
-  } else if (rand < inBoundsDistribution[3] + inBoundsDistribution[4]) {
-    return 4;
+  // Filter distribution to only unlocked octaves
+  let availableDistribution = { 3: 0, 4: 0, 5: 0 };
+  let totalAvailable = 0;
+  
+  unlockedOctaves.forEach(oct => {
+    if (oct >= 3 && oct <= 5) {
+      availableDistribution[oct] = inBoundsDistribution[oct];
+      totalAvailable += inBoundsDistribution[oct];
+    }
+  });
+  
+  // Normalize available distribution
+  if (totalAvailable > 0) {
+    Object.keys(availableDistribution).forEach(oct => {
+      availableDistribution[oct] /= totalAvailable;
+    });
   } else {
-    return 5;
+    // Fallback to equal distribution among unlocked octaves
+    unlockedOctaves.forEach(oct => {
+      if (oct >= 3 && oct <= 5) {
+        availableDistribution[oct] = 1.0 / unlockedOctaves.length;
+      }
+    });
   }
+  
+  // Sample according to available proportions
+  const rand = Math.random();
+  let cumulative = 0;
+  for (let oct of [3, 4, 5]) {
+    cumulative += availableDistribution[oct];
+    if (rand <= cumulative && availableDistribution[oct] > 0) {
+      return oct;
+    }
+  }
+  
+  // Fallback to first unlocked octave
+  return unlockedOctaves[0] || 4;
 }
 
 function selectOctaveForNote(note) {
@@ -2966,6 +3200,7 @@ async function nextTrial(forceNew=false){
   if(startSpecialAtBlock15()) return;
 
   inFlightTrial=true;
+  trialStartTime = performance.now(); // Track trial start time for RT measurement
   try{
     await resumeCtx();
     if(paused || !sessionActive || special) return;
@@ -3048,10 +3283,19 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
   
-  // Enhanced trial data with jitter information
+  // B) BOUNDARY PROBE RATE - Enhanced trial data with required fields
   const trialData = {
     note: currentNote,
     pc: truePc,
+    oct: currentNote ? parseInt(currentNote.slice(-1)) : null,
+    cents: !isOOBTrial && currentTrialJitter ? parseFloat(currentTrialJitter.jitter.toFixed(1)) : (isOOBTrial ? 0 : null),
+    detuneMode: isOOBTrial ? "oob" : 
+               (!currentTrialJitter ? "anchor" :
+                currentTrialJitter.isAnchor ? "anchor" :
+                currentTrialJitter.isProbe ? "probe" : "jitter"),
+    isOOB: isOOBTrial,
+    truePc: truePc,
+    guessPc: oobChosen ? null : (guessLabel === 'TARGET' ? truePc : guessLabel),
     guess: guessLabel,
     correct: ok,
     timeout,
@@ -3059,14 +3303,11 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     set: setFromIndex(state.levelIndex),
     block: block,
     time: Date.now(),
+    rtMs: timeout ? null : Math.round(performance.now() - (trialStartTime || performance.now())),
     jitter: currentTrialJitter,
     actualTimbre: currentTrialTimbre, // Store which timbre was actually used
-    // Required fields for logging
-    detuneCents: !isOOBTrial && currentTrialJitter ? currentTrialJitter.jitter : (isOOBTrial ? 0 : null),
-    detuneMode: isOOBTrial ? "oob" : 
-               (!currentTrialJitter ? "anchor" :
-                currentTrialJitter.isAnchor ? "anchor" :
-                currentTrialJitter.isProbe ? "probe" : "jitter")
+    // Legacy fields for compatibility
+    detuneCents: !isOOBTrial && currentTrialJitter ? currentTrialJitter.jitter : (isOOBTrial ? 0 : null)
   };
   
   state.trials.push(trialData);
@@ -4172,13 +4413,14 @@ function updateSimConfusionMatrix(truePc, guess) {
 }
 
 // Simulate cold/warm recall
+// E) RECALL (COLD/WARM) - Simulate recall test with proper verdict format
 function simulateRecall(type) {
   const learnedPcs = Object.keys(learnerSkills).filter(pc => learnerSkills[pc] > 0.55);
   const testPcs = learnedPcs.length >= 3 ? 
     shuffleArray(learnedPcs).slice(0, 3) : 
     learnedPcs;
   
-  return testPcs.map(pc => {
+  const results = testPcs.map(pc => {
     const skill = learnerSkills[pc];
     const meanError = (1 - skill) * 35; // Cents error mean
     const sdError = 12; // Standard deviation
@@ -4187,8 +4429,33 @@ function simulateRecall(type) {
     let error = normalRandom() * sdError + meanError;
     error = Math.max(-60, Math.min(60, error));
     
-    return { pc, cents: Math.round(error * 10) / 10 };
+    const medianCents = Math.round(error * 10) / 10;
+    const sdCents = Math.round(sdError * 10) / 10;
+    
+    // Calculate verdict: OnTarget (|median|≤10¢ & SD≤15¢), Close (|median|≤30¢), Off otherwise
+    let verdict = "Off";
+    if (Math.abs(medianCents) <= 10 && sdCents <= 15) {
+      verdict = "OnTarget";
+    } else if (Math.abs(medianCents) <= 30) {
+      verdict = "Close";
+    }
+    
+    return { 
+      pc, 
+      medianCents, 
+      sdCents, 
+      verdict 
+    };
   });
+  
+  // Store in the enhanced recall format per day
+  const currentDay = Math.floor((Date.now() - simStartTime) / (24 * 60 * 60 * 1000)) + 1;
+  if (!state.recall[currentDay]) {
+    state.recall[currentDay] = {};
+  }
+  state.recall[currentDay][type] = results;
+  
+  return results;
 }
 
 // Box-Muller normal distribution
@@ -4330,6 +4597,17 @@ function simulateTrial(set, blockNum, trialNum) {
       if (!response.correct && response.guess !== truePc) {
         updateSimConfusionMatrix(truePc, response.guess);
       }
+      
+      // C) JITTER LADDER LOGGING - Check for promotion/demotion on every trial
+      // Temporarily disable during checks to avoid recursion
+      const originalSimulating = SIMULATING;
+      SIMULATING = false;
+      try {
+        checkJitterPromotion(truePc);
+        checkJitterDemotion(truePc);
+      } finally {
+        SIMULATING = originalSimulating;
+      }
     }
     
     // Record in app state (simulate recordTrial call)
@@ -4413,6 +4691,12 @@ window.runSimWeek = function(opts = {}) {
       
       // Run daily blocks
       for (let block = 1; block <= dailyBlocks; block++) {
+        // A) OOB OCTAVE MIRRORING - Track block-level octave distributions
+        const blockInBoundsOctaves = { 3: 0, 4: 0, 5: 0 };
+        const blockOOBOctaves = { 3: 0, 4: 0, 5: 0 };
+        let blockInBoundsCount = 0;
+        let blockOOBCount = 0;
+        
         for (let trial = 1; trial <= trialsPerBlock; trial++) {
           const set = setFromIndex(state.levelIndex);
           const globalBlock = (day - 1) * dailyBlocks + block;
@@ -4478,14 +4762,68 @@ window.runSimWeek = function(opts = {}) {
             dayCurrentStreak = trialData.ok ? 0 : dayCurrentStreak + 1;
             dayOobMaxStreak = Math.max(dayOobMaxStreak, dayCurrentStreak);
             octaveCounts.oob[trialData.octave]++;
+            
+            // A) OOB OCTAVE MIRRORING - Track OOB octaves for this block
+            blockOOBOctaves[trialData.octave]++;
+            blockOOBCount++;
           } else {
             dayCurrentStreak = 0;
             octaveCounts.inBounds[trialData.octave]++;
+            
+            // A) OOB OCTAVE MIRRORING - Track in-bounds octaves for this block
+            blockInBoundsOctaves[trialData.octave]++;
+            blockInBoundsCount++;
             
             if (trialData.anchor) dayAnchors++;
             else if (trialData.probe) dayProbes++;
             else if (trialData.detuneCents !== 0) dayJittered++;
           }
+        }
+        
+        // A) OOB OCTAVE MIRRORING - Record block octave mirroring data
+        if (blockInBoundsCount > 0 || blockOOBCount > 0) {
+          const inBoundsFractions = { 3: 0, 4: 0, 5: 0 };
+          const oobFractions = { 3: 0, 4: 0, 5: 0 };
+          
+          // Calculate in-bounds fractions
+          if (blockInBoundsCount > 0) {
+            inBoundsFractions[3] = blockInBoundsOctaves[3] / blockInBoundsCount;
+            inBoundsFractions[4] = blockInBoundsOctaves[4] / blockInBoundsCount;
+            inBoundsFractions[5] = blockInBoundsOctaves[5] / blockInBoundsCount;
+          }
+          
+          // Calculate OOB fractions
+          if (blockOOBCount > 0) {
+            oobFractions[3] = blockOOBOctaves[3] / blockOOBCount;
+            oobFractions[4] = blockOOBOctaves[4] / blockOOBCount;
+            oobFractions[5] = blockOOBOctaves[5] / blockOOBCount;
+          }
+          
+          // Calculate percentage point differences
+          const diffPP = {
+            3: parseFloat(((oobFractions[3] - inBoundsFractions[3]) * 100).toFixed(1)),
+            4: parseFloat(((oobFractions[4] - inBoundsFractions[4]) * 100).toFixed(1)),
+            5: parseFloat(((oobFractions[5] - inBoundsFractions[5]) * 100).toFixed(1))
+          };
+          
+          // Store octave mirroring record
+          const mirrorRecord = {
+            block: (day - 1) * dailyBlocks + block,
+            inb: {
+              3: parseFloat(inBoundsFractions[3].toFixed(3)),
+              4: parseFloat(inBoundsFractions[4].toFixed(3)),
+              5: parseFloat(inBoundsFractions[5].toFixed(3))
+            },
+            oob: {
+              3: parseFloat(oobFractions[3].toFixed(3)),
+              4: parseFloat(oobFractions[4].toFixed(3)),
+              5: parseFloat(oobFractions[5].toFixed(3))
+            },
+            diff_pp: diffPP
+          };
+          
+          if (!state.oobOctaveMirror) state.oobOctaveMirror = [];
+          state.oobOctaveMirror.push(mirrorRecord);
         }
         
         // Trigger block boundary logic every 3 blocks
@@ -4532,6 +4870,9 @@ window.runSimWeek = function(opts = {}) {
       
       // Simulate warm recall at end of day
       const warmRecall = simulateRecall('warm');
+      
+      // C) JITTER LADDER LOGGING - Generate daily snapshots
+      generateDailyJitterSnapshot();
       
       // Calculate day statistics
       const oobTargetPct = state.oobStats?.adaptiveRate ?? 0.18; // Keep as fraction
@@ -4911,6 +5252,156 @@ function generatePerPitchStats() {
   return perPitchStats;
 }
 
+/* ------------------ QA EXPORT FULL ------------------ */
+// Add QA export API for verification tools
+window.QA = window.QA || {};
+
+// EXPORT API (for QA/tools) - Implement QA.exportFull as specified
+window.QA.exportFull = function(cfg = {}) {
+  // Calculate detune shares
+  const recentTrials = state.trials.slice(-1000).filter(t => !t.oob);
+  const anchorsCount = recentTrials.filter(t => t.detuneMode === 'anchor').length;
+  const probesCount = recentTrials.filter(t => t.detuneMode === 'probe').length;
+  const jitterCount = recentTrials.filter(t => t.detuneMode === 'jitter').length;
+  const totalDetune = anchorsCount + probesCount + jitterCount;
+  
+  const detuneShares = {
+    anchorsPct: totalDetune > 0 ? parseFloat((anchorsCount / totalDetune).toFixed(3)) : 0,
+    probesPct: totalDetune > 0 ? parseFloat((probesCount / totalDetune).toFixed(3)) : 0,
+    jitterPct: totalDetune > 0 ? parseFloat((jitterCount / totalDetune).toFixed(3)) : 0,
+    counts: { anchors: anchorsCount, probes: probesCount, jitter: jitterCount }
+  };
+  
+  // Calculate octave distributions
+  const inBoundsOctaves = { 3: 0, 4: 0, 5: 0 };
+  const oobOctaves = { 3: 0, 4: 0, 5: 0 };
+  
+  state.trials.slice(-1000).forEach(trial => {
+    if (trial.oct >= 3 && trial.oct <= 5) {
+      if (trial.oob) {
+        oobOctaves[trial.oct]++;
+      } else {
+        inBoundsOctaves[trial.oct]++;
+      }
+    }
+  });
+  
+  // Calculate OOB metrics
+  const oobTrials = state.trials.filter(t => t.oob);
+  const oobCorrect = oobTrials.filter(t => t.correct).length;
+  const observedPct = state.trials.length > 0 ? 
+    parseFloat((oobTrials.length / state.trials.length).toFixed(3)) : 0;
+  
+  // Calculate max OOB streak
+  let maxStreak = 0;
+  let currentStreak = 0;
+  state.trials.forEach(trial => {
+    if (trial.oob && !trial.correct) {
+      currentStreak++;
+      maxStreak = Math.max(maxStreak, currentStreak);
+    } else {
+      currentStreak = 0;
+    }
+  });
+  
+  // Calculate last 60 in-bounds accuracy
+  const last60InBounds = state.trials.filter(t => !t.oob).slice(-60);
+  const last60Acc = last60InBounds.length > 0 ? 
+    parseFloat((last60InBounds.filter(t => t.correct).length / last60InBounds.length).toFixed(3)) : 0;
+  
+  // Convert legacy oobSeries if needed
+  const convertedOobSeries = (state.oobSeries || []).map(entry => {
+    const converted = { ...entry };
+    // If old entry has value > 1, convert from percentage to fraction
+    if (converted.newTarget && converted.newTarget > 1) {
+      converted.targetPct = converted.newTarget / 100;
+      delete converted.newTarget;
+    } else if (converted.targetPct === undefined && converted.newTarget !== undefined) {
+      converted.targetPct = converted.newTarget;
+    }
+    return converted;
+  });
+  
+  // Generate per-pitch detune array
+  const byPitchDetuneArray = PC.map(pc => {
+    const level = state.jitterLevels[pc] || 0;
+    const config = JITTER_LEVELS[level];
+    const stats = state.noteStats[pc] || { trials: [], accuracy: 0, medianError: 0, sdError: 0 };
+    
+    return {
+      pc: pc,
+      JL: level,
+      anchorsPct: parseFloat(config.anchorRate.toFixed(3)),
+      probesPct: parseFloat(config.probeRate.toFixed(3)),
+      jitterPct: parseFloat((1.0 - config.anchorRate - config.probeRate).toFixed(3)),
+      jitterRange: `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`,
+      acc: stats.trials.length > 0 ? parseFloat(stats.accuracy.toFixed(3)) : null,
+      medianCents: stats.trials.length > 0 ? parseFloat(stats.medianError.toFixed(1)) : null,
+      sdCents: stats.trials.length > 0 ? parseFloat(stats.sdError.toFixed(1)) : null
+    };
+  });
+  
+  // Calculate days since start
+  const days = state.startDate ? 
+    Math.floor((Date.now() - state.startDate) / (24 * 60 * 60 * 1000)) + 1 : 1;
+  
+  return {
+    sim: { 
+      days: days, 
+      seed: cfg.seed || null 
+    },
+    counts: { 
+      tones: state.trials.length, 
+      trials: state.trials.length 
+    },
+    oob: { 
+      series: convertedOobSeries, 
+      observedPct: observedPct, 
+      maxStreak: maxStreak, 
+      last60Acc: last60Acc 
+    },
+    octaves: { 
+      inBounds: inBoundsOctaves, 
+      oob: oobOctaves, 
+      mirrorCheck: state.oobOctaveMirror || [] 
+    },
+    detune: { 
+      shares: detuneShares, 
+      perPitch: byPitchDetuneArray 
+    },
+    jitter: { 
+      levels: state.jitterLevels || {}, 
+      byPitch: state.jitter?.byPitch || {}, 
+      levelEvents: state.jitter?.levelEvents || [] 
+    },
+    curriculum: state.curriculum || { active: [], weights: {}, events: [] },
+    recall: state.recall || {},
+    tails: { 
+      tones: state.trials.slice(-400).map(t => ({
+        note: t.note,
+        pc: t.pc || t.truePc,
+        oct: t.oct,
+        cents: t.cents,
+        detuneMode: t.detuneMode,
+        isOOB: t.oob,
+        truePc: t.pc || t.truePc,
+        guessPc: t.guessPc,
+        correct: t.correct,
+        rtMs: t.rtMs
+      })), 
+      trials: state.trials.slice(-400).map(t => ({
+        truePc: t.pc || t.truePc,
+        guessPc: t.guessPc,
+        correct: t.correct,
+        oob: t.oob,
+        rtMs: t.rtMs,
+        cents: t.cents,
+        detuneMode: t.detuneMode
+      }))
+    }
+  };
+};
+
 /* ------------------ INIT ------------------ */
 // Log dev functions availability for confirmation
 console.log('🎵 Dev functions available:');
@@ -4918,6 +5409,7 @@ console.log('- runSimWeek:', typeof window.runSimWeek === 'function' ? '✅ avai
 console.log('- exportSimWeek:', typeof window.exportSimWeek === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
 console.log('- exportDailyByPitch:', typeof window.exportDailyByPitch === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
 console.log('- debugJitter:', typeof window.debugJitter === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
+console.log('- QA.exportFull:', typeof window.QA?.exportFull === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
 
 window.addEventListener('load', wireOnce);
 window.addEventListener('resize', ()=>{ try{ drawChart(); }catch(_){ }});
