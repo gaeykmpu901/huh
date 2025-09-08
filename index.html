@@ -896,7 +896,10 @@ function checkJitterPromotion(pc) {
       acc: parseFloat(stats.accuracy.toFixed(3)),
       medianCents: parseFloat(stats.medianError.toFixed(1)),
       sdCents: parseFloat(stats.sdError.toFixed(1)),
-      windowN: stats.trials.length
+      windowN: stats.trials.length,
+      timestamp: Date.now(),
+      reason: 'promotion',
+      criteria: `acc=${parseFloat(stats.accuracy.toFixed(3))} >= ${rule.accuracy}, median=${parseFloat(stats.medianError.toFixed(1))} <= ${rule.medianCents}${rule.sdCents ? `, sd=${parseFloat(stats.sdError.toFixed(1))} <= ${rule.sdCents}` : ''}`
     };
     state.jitter.levelEvents.push(event);
     
@@ -953,7 +956,10 @@ function checkJitterDemotion(pc) {
       acc: parseFloat(recentAcc.toFixed(3)),
       medianCents: parseFloat(recentMedian.toFixed(1)),
       sdCents: parseFloat(recentSD.toFixed(1)),
-      windowN: recentTrials.length
+      windowN: recentTrials.length,
+      timestamp: Date.now(),
+      reason: 'demotion',
+      criteria: `acc=${parseFloat(recentAcc.toFixed(3))} < ${rules.accuracy} OR median=${parseFloat(recentMedian.toFixed(1))} > ${rules.medianCents} OR sd=${parseFloat(recentSD.toFixed(1))} > ${rules.sdCents}`
     };
     state.jitter.levelEvents.push(event);
     
