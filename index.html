@@ -581,28 +581,28 @@ function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/1
 /* ------------------ JITTER LADDER SYSTEM ------------------ */
 // B) BOUNDARY PROBE RATE - Jitter level configurations (JL0 = easiest, JL3 = hardest)
 const JITTER_LEVELS = {
-  0: { // JL0 - onboarding/new timbre
+  0: { // JL0 - onboarding/new timbre  
     jitterRange: [3, 8],    // ±3-8¢
-    anchorRate: 0.275,      // 25-30% anchors 
-    probeRate: 0.03,        // 2-4% probes
+    anchorRate: 0.25,       // 25% anchors 
+    probeRate: 0.12,        // 12% probes to achieve global ~10-12%
     name: 'JL0'
   },
   1: { // JL1 - early
     jitterRange: [5, 10],   // ±5-10¢
     anchorRate: 0.175,      // 15-20% anchors
-    probeRate: 0.065,       // 5-8% probes
+    probeRate: 0.11,        // 11% probes
     name: 'JL1'
   },
   2: { // JL2 - mid
     jitterRange: [5, 15],   // ±5-15¢
     anchorRate: 0.125,      // 10-15% anchors
-    probeRate: 0.09,        // 8-10% probes
+    probeRate: 0.10,        // 10% probes
     name: 'JL2'
   },
   3: { // JL3 - hardest
     jitterRange: [5, 15],   // ±5-15¢
     anchorRate: 0.075,      // 5-10% anchors
-    probeRate: 0.11,        // 10-12% probes
+    probeRate: 0.12,        // 12% probes
     name: 'JL3'
   }
 };
@@ -907,11 +907,6 @@ function checkJitterPromotion(pc) {
     save();
   }
 }
-    
-    console.log(`JITTER_LEVEL pc=${pc} from JL${currentLevel}→JL${newLevel} (acc=${(stats.accuracy*100).toFixed(0)}%, median=${stats.medianError.toFixed(0)}¢, SD=${stats.sdError.toFixed(0)}¢)`);
-    save();
-  }
-}
 
 // Check for jitter level demotion
 function checkJitterDemotion(pc) {
@@ -966,11 +961,6 @@ function checkJitterDemotion(pc) {
     const config = JITTER_LEVELS[newLevel];
     state.jitterRangeUsed[pc] = `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`;
     
-    save();
-  }
-}
-    
-    console.log(`JITTER_LEVEL pc=${pc} from JL${currentLevel}→JL${newLevel} (acc=${(recentAcc*100).toFixed(0)}%, median=${recentMedian.toFixed(0)}¢, SD=${recentSD.toFixed(0)}¢)`);
     save();
   }
 }
