@@ -671,7 +671,7 @@ function adaptOOBTarget() {
   }
   
   const observedAcc = last60InBounds.filter(t => t.correct).length / last60InBounds.length;
-  const last60Acc = parseFloat(observedAcc.toFixed(3)); // Store as fraction 0..1
+  const last60Acc = num(observedAcc, 0); // Store as fraction 0..1, safely normalized
   
   let newTarget = state.oobStats.adaptiveRate ?? 0.18;
   let reason = 'no-change';
@@ -695,7 +695,7 @@ function adaptOOBTarget() {
   });
   const currentBlockOOB = currentBlockTrials.filter(t => t.oob);
   const observedPctThisBlock = currentBlockTrials.length > 0 ? 
-    parseFloat((currentBlockOOB.length / currentBlockTrials.length).toFixed(3)) : 0;
+    num(currentBlockOOB.length / currentBlockTrials.length, 0) : 0;
   
   // Record the adaptation in oobSeries per problem statement format
   if (!state.oobSeries) state.oobSeries = [];
@@ -703,7 +703,7 @@ function adaptOOBTarget() {
   
   const oobRecord = {
     globalTimeBlockIndex: state.counters.globalTimeBlockIndex,
-    targetPct: parseFloat(newTarget.toFixed(3)), // Store as fraction 0..1
+    targetPct: num(newTarget, 0.18), // Store as fraction 0..1, safely normalized
     last60Acc: last60Acc, // Store as fraction 0..1
     observedPctThisBlock: observedPctThisBlock // Fraction 0..1
   };
@@ -903,9 +903,9 @@ function checkJitterPromotion(pc) {
       pc: pc,
       from: currentLevel,
       to: newLevel,
-      acc: parseFloat(stats.accuracy.toFixed(3)),
-      medianCents: parseFloat(stats.medianError.toFixed(1)),
-      sdCents: parseFloat(stats.sdError.toFixed(1)),
+      acc: num(stats.accuracy, null),
+      medianCents: num(stats.medianError, null),
+      sdCents: num(stats.sdError, null),
       windowN: stats.trials.length
     };
     
@@ -960,9 +960,9 @@ function checkJitterDemotion(pc) {
       pc: pc,
       from: currentLevel,
       to: newLevel,
-      acc: parseFloat(recentAcc.toFixed(3)),
-      medianCents: parseFloat(recentMedian.toFixed(1)),
-      sdCents: parseFloat(recentSD.toFixed(1)),
+      acc: num(recentAcc, null),
+      medianCents: num(recentMedian, null),
+      sdCents: num(recentSD, null),
       windowN: recentTrials.length
     };
     
@@ -1094,7 +1094,7 @@ function getJitterInfo(pc) {
   const jitter = generateJitterForNote(pc, isProbe);
   
   return {
-    cents: parseFloat(jitter.toFixed(1)),
+    cents: num(jitter, null),
     mode: isProbe ? "probe" : "jitter",
     level: level
   };
@@ -1114,11 +1114,11 @@ window.jitterStatus = function() {
     const stats = state.noteStats[pc];
     
     const jitterRange = `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`;
-    const anchorsPercent = `${(config.anchorRate * 100).toFixed(1)}%`;
-    const probesPercent = `${(config.probeRate * 100).toFixed(1)}%`;
-    const accuracy = stats.trials.length > 0 ? `${(stats.accuracy * 100).toFixed(0)}%` : 'N/A';
-    const medianCents = stats.trials.length > 0 ? `${stats.medianError.toFixed(0)}¢` : 'N/A';
-    const sdCents = stats.trials.length > 0 ? `${stats.sdError.toFixed(0)}¢` : 'N/A';
+    const anchorsPercent = fmtPct(config.anchorRate, 1);
+    const probesPercent = fmtPct(config.probeRate, 1);
+    const accuracy = stats.trials.length > 0 ? fmtPct(stats.accuracy, 0) : 'N/A';
+    const medianCents = stats.trials.length > 0 ? fmtN(stats.medianError, 0) + '¢' : 'N/A';
+    const sdCents = stats.trials.length > 0 ? fmtN(stats.sdError, 0) + '¢' : 'N/A';
     
     console.log(`${pc}\t${config.name}\t${jitterRange}\t\t${anchorsPercent}\t\t${probesPercent}\t\t${accuracy}\t\t${medianCents}\t${sdCents}`);
   });
@@ -1448,6 +1448,11 @@ function todayKey(ts){ return dateAtMidnight(ts||Date.now()); }
 function nextMidnight(ts){ const today = dateAtMidnight(ts||Date.now()); return today + 24*60*60*1000; }
 function weekIndex(ts){ const base=ts||Date.now(); if(!state.startDate) return 0; return Math.floor((base-state.startDate)/(7*24*60*60*1000)); }
 function currentWeekIdx(){ return weekIndex(Date.now()); }
+
+/* ------------------ NUMERIC FORMATTING HELPERS ------------------ */
+function num(x, def=null){ if(x === null || x === undefined) return def; const v=Number(x); return Number.isFinite(v)?v:def; }
+function fmtN(x,d=1){ const v=num(x,null); return v===null?'—':v.toFixed(d); }
+function fmtPct(frac,d=1){ const f=num(frac,null); return f===null?'—':(f*100).toFixed(d)+'%'; }
 function weekStartTs(){ if(!state.startDate) return todayKey(Date.now()); const idx=currentWeekIdx(); const base=dateAtMidnight(state.startDate); return base + idx*7*86400000; }
 
 /* ------------------ DURATION ------------------ */
@@ -1971,9 +1976,9 @@ function generateDailyJitterSnapshot() {
     const stats = state.noteStats[pc];
     
     // Calculate shares
-    const anchorsPct = parseFloat((config.anchorRate).toFixed(3));
-    const probesPct = parseFloat((config.probeRate).toFixed(3));
-    const jitterPct = parseFloat((1.0 - config.anchorRate - config.probeRate).toFixed(3));
+    const anchorsPct = num(config.anchorRate, 0);
+    const probesPct = num(config.probeRate, 0);
+    const jitterPct = num(1.0 - config.anchorRate - config.probeRate, 0);
     
     state.jitter.byPitch[pc] = {
       JL: level,
@@ -1981,9 +1986,9 @@ function generateDailyJitterSnapshot() {
       probesPct: probesPct,
       jitterPct: jitterPct,
       jitterRange: `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`,
-      acc: stats.trials.length > 0 ? parseFloat(stats.accuracy.toFixed(3)) : null,
-      medianCents: stats.trials.length > 0 ? parseFloat(stats.medianError.toFixed(1)) : null,
-      sdCents: stats.trials.length > 0 ? parseFloat(stats.sdError.toFixed(1)) : null
+      acc: stats.trials.length > 0 ? num(stats.accuracy, null) : null,
+      medianCents: stats.trials.length > 0 ? num(stats.medianError, null) : null,
+      sdCents: stats.trials.length > 0 ? num(stats.sdError, null) : null
     };
   });
   
@@ -2067,8 +2072,8 @@ function updateDebugInfo() {
     info.push(`\n=== JITTER LEVELS ===`);
     Object.entries(state.jitterLevels).forEach(([note, level]) => {
       const stats = state.noteStats?.[note];
-      const acc = stats ? (stats.accuracy * 100).toFixed(0) : 'N/A';
-      const err = stats ? stats.medianError.toFixed(0) : 'N/A';
+      const acc = stats ? fmtPct(stats.accuracy, 0) : 'N/A';
+      const err = stats ? fmtN(stats.medianError, 0) + '¢' : 'N/A';
       info.push(`${note}: ${level} (${acc}% acc, ${err}¢ err)`);
     });
   }
@@ -2076,7 +2081,7 @@ function updateDebugInfo() {
   // OOB state
   if (state.oobStats) {
     info.push(`\n=== OOB SYSTEM ===`);
-    info.push(`Adaptive Rate: ${(state.oobStats.adaptiveRate * 100).toFixed(1)}%`);
+    info.push(`Adaptive Rate: ${fmtPct(state.oobStats.adaptiveRate, 1)}`);
     info.push(`Streak Count: ${state.oobStats.streakCount}`);
     info.push(`Health Check: ${state.oobStats.healthCheckActive}`);
     info.push(`Recent Trials: ${state.oobStats.recentTrials.length}/60`);
@@ -2086,7 +2091,7 @@ function updateDebugInfo() {
   if (state.octaveStats) {
     info.push(`\n=== OCTAVE MIXING ===`);
     const mix = state.octaveStats.currentMix;
-    info.push(`Current Mix: ${(mix.center * 100).toFixed(0)}% center, ${(mix.neighbors * 100).toFixed(0)}% neighbors`);
+    info.push(`Current Mix: ${fmtPct(mix.center, 0)} center, ${fmtPct(mix.neighbors, 0)} neighbors`);
     info.push(`Set Trials: ${state.octaveStats.setTrials.length}/24`);
   }
   
@@ -2972,14 +2977,14 @@ function addOctaveMirrorCheck(blockIdx) {
     blockIdx: blockIdx,
     mirrored: mirrored,
     inBoundsPct: {
-      3: parseFloat(inBoundsPct[3].toFixed(3)),
-      4: parseFloat(inBoundsPct[4].toFixed(3)),
-      5: parseFloat(inBoundsPct[5].toFixed(3))
+      3: num(inBoundsPct[3], 0),
+      4: num(inBoundsPct[4], 0),
+      5: num(inBoundsPct[5], 0)
     },
     oobPct: {
-      3: parseFloat(oobPct[3].toFixed(3)),
-      4: parseFloat(oobPct[4].toFixed(3)),
-      5: parseFloat(oobPct[5].toFixed(3))
+      3: num(oobPct[3], 0),
+      4: num(oobPct[4], 0),
+      5: num(oobPct[5], 0)
     },
     windowSize: totalInBounds,
     timestamp: Date.now()
@@ -3004,9 +3009,9 @@ function updateLevelUI(){
   textWithTooltip('blockInfo', `Block ${block} / 24`);
   if(block >= 21){ textWithTooltip('accInfo', `Testing — No Feedback`); }
   else{
-    const req=(thresholdForIndex(state.levelIndex)*100).toFixed(0);
-    const acc=((state.levelCorrect/state.levelTrials*100)||0).toFixed(0);
-    textWithTooltip('accInfo', `Acc ${acc}% (req ${req}%)`);
+    const req=fmtPct(thresholdForIndex(state.levelIndex), 0);
+    const acc=fmtPct(state.levelCorrect/state.levelTrials||0, 0);
+    textWithTooltip('accInfo', `Acc ${acc} (req ${req})`);
   }
   textWithTooltip('delayInfo', `RT limit: ${rtWindowForSet(set)}ms • Delay: ${delayMs}ms`);
   
@@ -3597,7 +3602,7 @@ async function nextTrial(forceNew=false){
       note: currentNote,
       pc: truePc,
       oct: currentNote ? parseInt(currentNote.slice(-1)) : null,
-      cents: isOOBTrial ? 0 : parseFloat((currentTrialJitter.jitter || 0).toFixed(1)),
+      cents: isOOBTrial ? 0 : num(currentTrialJitter.jitter || 0, null),
       detuneMode: isOOBTrial ? "oob" : 
                  (currentTrialJitter.isAnchor ? "anchor" :
                   currentTrialJitter.isProbe ? "probe" : "jitter"),
@@ -3708,9 +3713,9 @@ function updateDetuneShares(trialData) {
     const total = state.qa.detune.shares.counts.total;
     if (total > 0) {
       state.qa.detune.shares.pct = {
-        anchorsPct: parseFloat((state.qa.detune.shares.counts.anchors / total).toFixed(3)),
-        probesPct: parseFloat((state.qa.detune.shares.counts.probes / total).toFixed(3)),
-        jitterPct: parseFloat((state.qa.detune.shares.counts.jitter / total).toFixed(3))
+        anchorsPct: num(state.qa.detune.shares.counts.anchors / total, 0),
+        probesPct: num(state.qa.detune.shares.counts.probes / total, 0),
+        jitterPct: num(state.qa.detune.shares.counts.jitter / total, 0)
       };
     }
   }
@@ -3792,12 +3797,12 @@ function updateDetuneShares(trialData) {
       
       state.qa.detune.byPitch[pc] = {
         JL: state.jitterLevels?.[pc] ?? 0,
-        anchorsPct: totalCount > 0 ? parseFloat((anchorsCount / totalCount).toFixed(3)) : 0,
-        probesPct: totalCount > 0 ? parseFloat((probesCount / totalCount).toFixed(3)) : 0,
-        jitterPct: totalCount > 0 ? parseFloat((jitterCount / totalCount).toFixed(3)) : 0,
-        meanAbsCents: parseFloat(mean.toFixed(1)),
-        medianAbsCents: parseFloat(state.jitter.perPitch[pc].medianCents.toFixed(1)),
-        sdAbsCents: parseFloat(state.jitter.perPitch[pc].sdCents.toFixed(1)),
+        anchorsPct: totalCount > 0 ? num(anchorsCount / totalCount, 0) : 0,
+        probesPct: totalCount > 0 ? num(probesCount / totalCount, 0) : 0,
+        jitterPct: totalCount > 0 ? num(jitterCount / totalCount, 0) : 0,
+        meanAbsCents: num(mean, null),
+        medianAbsCents: num(state.jitter.perPitch[pc].medianCents, null),
+        sdAbsCents: num(state.jitter.perPitch[pc].sdCents, null),
         windowN: trials.length
       };
     }
@@ -3828,7 +3833,7 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     note: currentNote,
     pc: truePc,
     oct: currentNote ? parseInt(currentNote.slice(-1)) : null,
-    cents: !isOOBTrial && currentTrialJitter ? parseFloat((currentTrialJitter.jitter || 0).toFixed(1)) : (isOOBTrial ? 0 : null),
+    cents: !isOOBTrial && currentTrialJitter ? num(currentTrialJitter.jitter || 0, null) : (isOOBTrial ? 0 : null),
     detuneMode: isOOBTrial ? "oob" : 
                (!currentTrialJitter ? "anchor" :
                 currentTrialJitter.isAnchor ? "anchor" :
@@ -3844,14 +3849,26 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     set: setFromIndex(state.levelIndex),
     block: block,
     time: Date.now(),
-    rtMs: timeout ? null : Math.round(performance.now() - (trialStartTime || performance.now())),
+    rtMs: num(timeout ? null : Math.round(performance.now() - (trialStartTime || performance.now())), Date.now()-(state.toneStartMs||Date.now())),
     jitter: currentTrialJitter,
     actualTimbre: currentTrialTimbre, // Store which timbre was actually used
     // Legacy fields for compatibility
     detuneCents: !isOOBTrial && currentTrialJitter ? currentTrialJitter.jitter : (isOOBTrial ? 0 : null)
   };
   
-  state.trials.push(trialData);
+  // Ensure trial object always has safe fields as specified in problem statement
+  const normalizedTrial = {
+    trueNote: trialData.note || (state.currentPc ? state.currentPc + (state.currentOct ?? 4) : null),
+    truePc: trialData.pc || state.currentPc || null,
+    guess: trialData.guess ?? null,
+    guessPc: trialData.guessPc ?? null,
+    correct: !!trialData.correct,
+    oob: !!trialData.oob,
+    rtMs: num(trialData.rtMs, null),
+    ...trialData // Spread the rest of the original data
+  };
+  
+  state.trials.push(normalizedTrial);
   
   // Store detune information for in-bounds trials as specified
   if (!isOOBTrial && currentTrialJitter) {
@@ -4120,9 +4137,9 @@ function computeOOBOctaveMirroring() {
     inBounds: {3: inBoundsCounts[3], 4: inBoundsCounts[4], 5: inBoundsCounts[5]},
     oob: {3: oobCounts[3], 4: oobCounts[4], 5: oobCounts[5]},
     diff_pp: {
-      3: parseFloat(diff_pp[3].toFixed(1)),
-      4: parseFloat(diff_pp[4].toFixed(1)),
-      5: parseFloat(diff_pp[5].toFixed(1))
+      3: num(diff_pp[3], null),
+      4: num(diff_pp[4], null),
+      5: num(diff_pp[5], null)
     }
   });
   
@@ -4151,7 +4168,7 @@ function computeOOBOctaveMirroring() {
       
       state.mirrorDiffPerBlock.push({
         globalTimeBlockIndex: state.globalTimeBlockIndex,
-        mirrorDiff_pp: parseFloat(mirrorDiff.toFixed(1)),
+        mirrorDiff_pp: num(mirrorDiff, null),
         octaveDistribution: { 3: oct3Pct, 4: oct4Pct, 5: oct5Pct }
       });
     }
@@ -5017,15 +5034,15 @@ function trackBlockEndOOBSeries(blockIdx) {
   const blockTrials = state.trials.slice(-40); // Last 40 trials (current block)
   const blockOOBTrials = blockTrials.filter(t => t.oob);
   const observedPct = blockTrials.length > 0 ? 
-    parseFloat((blockOOBTrials.length / blockTrials.length).toFixed(3)) : 0;
+    num(blockOOBTrials.length / blockTrials.length, 0) : 0;
   
   // Calculate last 60 in-bounds accuracy
   const last60InBounds = state.trials.filter(t => !t.oob).slice(-60);
   const last60Acc = last60InBounds.length > 0 ? 
-    parseFloat((last60InBounds.filter(t => t.correct).length / last60InBounds.length).toFixed(3)) : 0;
+    num(last60InBounds.filter(t => t.correct).length / last60InBounds.length, 0) : 0;
   
   // Get current target percentage
-  const targetPct = parseFloat((state.oobStats?.adaptiveRate || 0.18).toFixed(3));
+  const targetPct = num(state.oobStats?.adaptiveRate || 0.18, 0.18);
   
   // Initialize QA structures if needed
   if (!state.qa) state.qa = {};
@@ -5594,23 +5611,23 @@ window.runSimWeek = function(opts = {}) {
           
           // Calculate percentage point differences
           const diffPP = {
-            3: parseFloat(((oobFractions[3] - inBoundsFractions[3]) * 100).toFixed(1)),
-            4: parseFloat(((oobFractions[4] - inBoundsFractions[4]) * 100).toFixed(1)),
-            5: parseFloat(((oobFractions[5] - inBoundsFractions[5]) * 100).toFixed(1))
+            3: num((oobFractions[3] - inBoundsFractions[3]) * 100, null),
+            4: num((oobFractions[4] - inBoundsFractions[4]) * 100, null),
+            5: num((oobFractions[5] - inBoundsFractions[5]) * 100, null)
           };
           
           // Store octave mirroring record
           const mirrorRecord = {
             block: (day - 1) * dailyBlocks + block,
             inb: {
-              3: parseFloat(inBoundsFractions[3].toFixed(3)),
-              4: parseFloat(inBoundsFractions[4].toFixed(3)),
-              5: parseFloat(inBoundsFractions[5].toFixed(3))
+              3: num(inBoundsFractions[3], 0),
+              4: num(inBoundsFractions[4], 0),
+              5: num(inBoundsFractions[5], 0)
             },
             oob: {
-              3: parseFloat(oobFractions[3].toFixed(3)),
-              4: parseFloat(oobFractions[4].toFixed(3)),
-              5: parseFloat(oobFractions[5].toFixed(3))
+              3: num(oobFractions[3], 0),
+              4: num(oobFractions[4], 0),
+              5: num(oobFractions[5], 0)
             },
             diff_pp: diffPP
           };
@@ -6109,7 +6126,7 @@ window.QA.exportFull = function(opts = {}) {
   const oobTrials = trialsData.filter(t => t.oob);
   const oobCorrect = oobTrials.filter(t => t.correct).length;
   const observedPct = totalTrials > 0 ? 
-    parseFloat((oobTrials.length / totalTrials).toFixed(3)) : 0;
+    num(oobTrials.length / totalTrials, 0) : 0;
   
   // Calculate max OOB streak
   let maxStreak = 0;
@@ -6126,7 +6143,7 @@ window.QA.exportFull = function(opts = {}) {
   // Calculate last 60 in-bounds accuracy
   const last60InBounds = trialsData.filter(t => !t.oob && t.correct !== undefined).slice(-60);
   const last60Acc = last60InBounds.length > 0 ? 
-    parseFloat((last60InBounds.filter(t => t.correct).length / last60InBounds.length).toFixed(3)) : 0;
+    num(last60InBounds.filter(t => t.correct).length / last60InBounds.length, 0) : 0;
   
   return {
     counts: { 
