@@ -1312,12 +1312,25 @@ state.curriculum.events ??= [];       // Scheduler events
 // E) RECALL SUMMARIES - Initialize enhanced recall tracking
 state.recall ??= {};                  // Per-day recall results
 
-// F) UNIFIED CADENCE TRACKING - Initialize new tracking fields
-state.trialIndex ??= state.trials?.length || 0;
-state.inbTrialIndex ??= state.trials?.filter(t => !t.oob && t.correct !== undefined).length || 0;
-state.qBlockIndex ??= Math.floor(state.inbTrialIndex / 20) + (state.inbTrialIndex > 0 ? 1 : 0);
-state.timeBlockIndex ??= (state.minutesToday % 30) / 6 + 1; // 1-5 within day
-state.globalTimeBlockIndex ??= Math.floor((state.minutesToday || 0) / 6);
+// F) UNIFIED CADENCE TRACKING - Initialize centralized counters as specified
+state.counters ??= {
+  trialIndex: state.trials?.length || 0,            // all trials (in-bounds + OOB)
+  inbTrialIndex: state.trials?.filter(t => !t.oob && t.correct !== undefined).length || 0,         // in-bounds only
+  timeBlockIndex: Math.min(5, Math.floor(((state.minutesToday || 0) % 30) / 6) + 1),        // 1..5 today
+  globalTimeBlockIndex: Math.floor((state.minutesToday || 0) / 6),  // increases across days
+  qBlockIndex: 0,           // Math.floor(inbTrialIndex/20)+1
+  lastOOBAdaptAt: { globalTimeBlockIndex: 0, inbTrialIndex: 0 }
+};
+
+// Calculate qBlockIndex properly
+state.counters.qBlockIndex = Math.floor(state.counters.inbTrialIndex / 20) + 1;
+
+// Maintain backward compatibility
+state.trialIndex ??= state.counters.trialIndex;
+state.inbTrialIndex ??= state.counters.inbTrialIndex;
+state.qBlockIndex ??= state.counters.qBlockIndex;
+state.timeBlockIndex ??= state.counters.timeBlockIndex;
+state.globalTimeBlockIndex ??= state.counters.globalTimeBlockIndex;
 state.lastOOBAdaptAt ??= { inbTrialIndex: 0, globalTimeBlockIndex: 0 };
 state.oobSeries ??= [];
 // Preserve existing octaveStats structure and add unified tracking fields
@@ -1345,7 +1358,12 @@ state.qa.oob ??= {};
 state.qa.oob.series ??= []; // Will store time block adaptation records
 
 state.qa.octaves ??= {};
+state.qa.octaves.inBounds ??= { 3: 0, 4: 0, 5: 0 };
+state.qa.octaves.oob ??= { 3: 0, 4: 0, 5: 0 };
 state.qa.octaves.mirror ??= []; // Will store per-block octave mirroring data
+state.qa.octaves.mirrorCheck ??= [];
+state.qa.octaves.lastInBoundsWindow ??= { 3: 0, 4: 0, 5: 0 };
+state.qa.octaves.inBoundsWindowTrials ??= [];
 
 state.qa.detune ??= {};
 state.qa.detune.shares ??= { counts: { anchors: 0, probes: 0, jitter: 0, total: 0 }, pct: {} };
@@ -2535,6 +2553,18 @@ function initializeOctaveState() {
       }
     };
   }
+  
+  // Ensure all properties exist even if state.octaveStats was partially initialized
+  state.octaveStats.currentMix ??= { center: 0.90, neighbors: 0.10 };
+  state.octaveStats.centerOctave ??= 4;
+  state.octaveStats.trialCount ??= 0;
+  state.octaveStats.setTrials ??= [];
+  state.octaveStats.performanceWindows ??= {
+    window8_12: null,
+    window12_16: null, 
+    window16_20: null,
+    window20_24: null
+  };
 }
 
 function getOctaveRange() {
@@ -2699,6 +2729,11 @@ function updateOctaveMixing(trialData) {
   const stats = state.octaveStats;
   stats.trialCount++;
   
+  // Ensure setTrials array exists (can be missing during simulation)
+  if (!stats.setTrials) {
+    stats.setTrials = [];
+  }
+  
   // Initialize QA octave tracking
   if (!state.qa) state.qa = {};
   if (!state.qa.octaves) state.qa.octaves = {
@@ -2708,6 +2743,11 @@ function updateOctaveMixing(trialData) {
     lastInBoundsWindow: { 3: 0, 4: 0, 5: 0 }, // For mirror check logic
     inBoundsWindowTrials: [] // Rolling window of last completed in-bounds trials
   };
+  
+  // Ensure inBoundsWindowTrials array exists
+  if (!state.qa.octaves.inBoundsWindowTrials) {
+    state.qa.octaves.inBoundsWindowTrials = [];
+  }
   
   // Track octave counts for QA export
   const octave = trialData.oct;
@@ -5278,6 +5318,9 @@ window.runSimWeek = function(opts = {}) {
   initializeLearnerSkills();
   initializeSimConfusionMatrix();
   
+  // Ensure octave state is properly initialized for simulation
+  initializeOctaveState();
+  
   // Predeclare output structure as required
   const out = { perDay: [], tones: [], trials: [], oobSeries: [] };
   
@@ -5326,8 +5369,8 @@ window.runSimWeek = function(opts = {}) {
           // Generate trial with the exact same policy code the live app uses
           const trialData = simulateTrial(set, block, trial);
           
-          // Create tone record for QA exporters
-          const mode = trialData.isOOB ? "oob" : 
+          // Create tone record for QA exporters - match exact format from problem statement
+          const detuneMode = trialData.isOOB ? "oob" : 
                       trialData.anchor ? "anchor" :
                       trialData.probe ? "probe" : "jitter";
           
@@ -5335,9 +5378,9 @@ window.runSimWeek = function(opts = {}) {
             note: trialData.currentNote,
             pc: trialData.pc,
             oct: trialData.octave,
-            cents: trialData.isOOB ? 0 : trialData.detuneCents,
+            cents: trialData.isOOB ? 0 : (trialData.detuneCents || 0),
+            detuneMode: detuneMode, // Use detuneMode as specified in problem statement
             isOOB: trialData.isOOB,
-            mode: mode,
             timbre: "piano" // Default timbre for simulation
           };
           out.tones.push(toneRecord);
@@ -5880,12 +5923,25 @@ window.QA = window.QA || {};
 
 // EXPORT API (for QA/tools) - Implement QA.exportFull as specified
 window.QA.exportFull = function(opts = {}) {
-  // Calculate counts
-  const totalTrials = state.trials.length;
-  const totalTones = state.trials.length;
+  // Allow passing simulation data for analysis
+  const simData = opts.simData;
+  
+  let totalTrials, totalTones, trialsData;
+  
+  if (simData) {
+    // Use simulation data
+    totalTrials = simData.trials?.length || 0;
+    totalTones = simData.tones?.length || 0;
+    trialsData = simData.trials || [];
+  } else {
+    // Use live state data
+    totalTrials = state.trials.length;
+    totalTones = totalTrials; // Each trial has one tone presentation
+    trialsData = state.trials;
+  }
   
   // Calculate OOB metrics
-  const oobTrials = state.trials.filter(t => t.oob);
+  const oobTrials = trialsData.filter(t => t.oob);
   const oobCorrect = oobTrials.filter(t => t.correct).length;
   const observedPct = totalTrials > 0 ? 
     parseFloat((oobTrials.length / totalTrials).toFixed(3)) : 0;
@@ -5893,7 +5949,7 @@ window.QA.exportFull = function(opts = {}) {
   // Calculate max OOB streak
   let maxStreak = 0;
   let currentStreak = 0;
-  state.trials.forEach(trial => {
+  trialsData.forEach(trial => {
     if (trial.oob) {
       currentStreak++;
       maxStreak = Math.max(maxStreak, currentStreak);
@@ -5903,7 +5959,7 @@ window.QA.exportFull = function(opts = {}) {
   });
   
   // Calculate last 60 in-bounds accuracy
-  const last60InBounds = state.trials.filter(t => !t.oob && t.correct !== undefined).slice(-60);
+  const last60InBounds = trialsData.filter(t => !t.oob && t.correct !== undefined).slice(-60);
   const last60Acc = last60InBounds.length > 0 ? 
     parseFloat((last60InBounds.filter(t => t.correct).length / last60InBounds.length).toFixed(3)) : 0;
   
@@ -5936,8 +5992,8 @@ window.QA.exportFull = function(opts = {}) {
     },
     curriculum: state.qa.curriculum || { active: [], weights: {}, events: [] },
     tails: { 
-      tones: state.trials.slice(-400), 
-      trials: state.trials.slice(-400)
+      tones: simData ? simData.tones?.slice(-400) || [] : trialsData.slice(-400), 
+      trials: trialsData.slice(-400)
     }
   };
 };
