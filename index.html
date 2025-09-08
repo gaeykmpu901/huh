@@ -577,6 +577,48 @@ const TONE_MS=800;
 const THRESH_24=[0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.55,0.60,0.60,0.65,0.70,0.75,0.78,0.80,0.83,0.85,0.88,0.90,0.90,0.90,0.90,0.90,0.90];
 function blockHasFeedback(block){ return block<=20; }
 function rtWindowForSet(n){const a=1183,b=2028;return Math.round(a+(n-1)*(b-a)/11);}
+
+/* ------------------ JITTER LADDER SYSTEM ------------------ */
+// Jitter level configurations (JL0 = easiest, JL3 = hardest)
+const JITTER_LEVELS = {
+  0: { // JL0 - onboarding/new timbre
+    jitterRange: [3, 8],    // ±3-8¢
+    anchorRate: 0.30,       // ≥30% anchors
+    probeRate: 0.08,        // 8% probes (increased from 2%)
+    name: 'JL0'
+  },
+  1: { // JL1 - early
+    jitterRange: [5, 10],   // ±5-10¢
+    anchorRate: 0.175,      // ~15-20% anchors
+    probeRate: 0.09,        // 9% probes
+    name: 'JL1'
+  },
+  2: { // JL2 - mid
+    jitterRange: [5, 15],   // ±5-15¢
+    anchorRate: 0.125,      // ~10-15% anchors
+    probeRate: 0.10,        // 10% probes
+    name: 'JL2'
+  },
+  3: { // JL3 - hardest
+    jitterRange: [5, 15],   // ±5-15¢
+    anchorRate: 0.075,      // ~5-10% anchors
+    probeRate: 0.12,        // 12% probes
+    name: 'JL3'
+  }
+};
+
+// Promotion/demotion thresholds
+const JITTER_PROMOTION_RULES = {
+  '0to1': { accuracy: 0.75, medianCents: 20 },   // JL0→JL1
+  '1to2': { accuracy: 0.80, medianCents: 15 },   // JL1→JL2  
+  '2to3': { accuracy: 0.90, medianCents: 10, sdCents: 15 }  // JL2→JL3
+};
+
+const JITTER_DEMOTION_RULES = {
+  accuracy: 0.75,    // Drop 1 level if acc < 75%
+  medianCents: 25,   // Drop 1 level if median > 25¢
+  sdCents: 30        // Drop 1 level if SD > 30¢
+};
 /* ------------------ ENHANCED OOB SYSTEM ------------------ */
 // B) OOB GENERATION = BERNOULLI PER TRIAL + ≤2 STREAK with 3-block cadence adaptation
 function shouldGenerateOOB(set) {
@@ -593,15 +635,15 @@ function shouldGenerateOOB(set) {
 
 // Get current OOB target rate with 3-block cadence adaptation
 function getAdaptiveOOBTarget() {
-  const currentBlock = getCurrentBlock();
+  const currentBlock = blockFromIndex(state.levelIndex);
   
   // Initialize adaptation tracking if needed
   if (!state.oobStats.adaptationCount) {
     state.oobStats.adaptationCount = 0;
   }
   
-  // Check if we need to adapt (every 3 blocks) 
-  if (currentBlock % 3 === 1) {
+  // Check if we need to adapt (every 3 blocks: 3, 6, 9, 12, ...)
+  if (currentBlock % 3 === 0) {
     // Ensure we don't adapt the same block multiple times
     if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== currentBlock) {
       // In simulation mode, limit total adaptations to prevent spam
@@ -659,7 +701,7 @@ function adaptOOBTarget() {
   });
   
   // Add debug logging as requested
-  const currentBlock = getCurrentBlock();
+  const currentBlock = blockFromIndex(state.levelIndex);
   console.log(`OOB_ADAPT block=${currentBlock} last60_acc=${observedAcc60}% new_target=${Math.round(newTarget * 100)}%`);
   
   state.oobStats.adaptiveRate = newTarget;
@@ -727,6 +769,226 @@ function selectOOBNote(set) {
   
   return rand(oobs);
 }
+
+/* ------------------ JITTER LEVEL MANAGEMENT ------------------ */
+// Initialize jitter level for a note if not already set
+function initializeJitterLevel(pc) {
+  if (!state.jitterLevels) state.jitterLevels = {};
+  if (!(pc in state.jitterLevels)) {
+    state.jitterLevels[pc] = 0; // Start at JL0
+    save();
+  }
+}
+
+// Initialize note statistics for tracking
+function initializeNoteStats(pc) {
+  if (!state.noteStats) state.noteStats = {};
+  if (!(pc in state.noteStats)) {
+    state.noteStats[pc] = {
+      trials: [],           // Last ~40 trials
+      accuracy: 0,
+      medianError: 0,
+      sdError: 0,
+      meanAbsCents: 0
+    };
+    save();
+  }
+}
+
+// Update note statistics after a trial
+function updateNoteStats(pc, correct, jitterCents) {
+  initializeNoteStats(pc);
+  const stats = state.noteStats[pc];
+  
+  // Add new trial (keep last 40)
+  stats.trials.push({
+    correct: correct,
+    jitterCents: Math.abs(jitterCents || 0),
+    timestamp: Date.now()
+  });
+  
+  if (stats.trials.length > 40) {
+    stats.trials = stats.trials.slice(-40);
+  }
+  
+  // Recalculate statistics
+  if (stats.trials.length > 0) {
+    stats.accuracy = stats.trials.filter(t => t.correct).length / stats.trials.length;
+    
+    const errors = stats.trials.map(t => t.jitterCents);
+    errors.sort((a, b) => a - b);
+    stats.medianError = errors[Math.floor(errors.length / 2)] || 0;
+    
+    const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+    const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+    stats.sdError = Math.sqrt(variance);
+    stats.meanAbsCents = mean;
+  }
+  
+  save();
+}
+
+// Check for jitter level promotion
+function checkJitterPromotion(pc) {
+  initializeJitterLevel(pc);
+  initializeNoteStats(pc);
+  
+  const currentLevel = state.jitterLevels[pc];
+  const stats = state.noteStats[pc];
+  
+  if (stats.trials.length < 20) return; // Need enough data
+  
+  // Check promotion rules
+  let canPromote = false;
+  let newLevel = currentLevel;
+  
+  if (currentLevel === 0) {
+    // JL0 → JL1
+    const rule = JITTER_PROMOTION_RULES['0to1'];
+    if (stats.accuracy >= rule.accuracy && stats.medianError <= rule.medianCents) {
+      canPromote = true;
+      newLevel = 1;
+    }
+  } else if (currentLevel === 1) {
+    // JL1 → JL2
+    const rule = JITTER_PROMOTION_RULES['1to2'];
+    if (stats.accuracy >= rule.accuracy && stats.medianError <= rule.medianCents) {
+      canPromote = true;
+      newLevel = 2;
+    }
+  } else if (currentLevel === 2) {
+    // JL2 → JL3
+    const rule = JITTER_PROMOTION_RULES['2to3'];
+    if (stats.accuracy >= rule.accuracy && 
+        stats.medianError <= rule.medianCents && 
+        stats.sdError <= rule.sdCents) {
+      canPromote = true;
+      newLevel = 3;
+    }
+  }
+  
+  if (canPromote) {
+    state.jitterLevels[pc] = newLevel;
+    console.log(`JITTER_LEVEL pc=${pc} from JL${currentLevel}→JL${newLevel} (acc=${(stats.accuracy*100).toFixed(0)}%, median=${stats.medianError.toFixed(0)}¢, SD=${stats.sdError.toFixed(0)}¢)`);
+    save();
+  }
+}
+
+// Check for jitter level demotion
+function checkJitterDemotion(pc) {
+  initializeJitterLevel(pc);
+  initializeNoteStats(pc);
+  
+  const currentLevel = state.jitterLevels[pc];
+  const stats = state.noteStats[pc];
+  
+  if (currentLevel === 0 || stats.trials.length < 15) return; // Can't demote from JL0, need data
+  
+  // Use last 20 trials for demotion check
+  const recentTrials = stats.trials.slice(-20);
+  if (recentTrials.length < 15) return;
+  
+  const recentAcc = recentTrials.filter(t => t.correct).length / recentTrials.length;
+  const recentErrors = recentTrials.map(t => t.jitterCents);
+  recentErrors.sort((a, b) => a - b);
+  const recentMedian = recentErrors[Math.floor(recentErrors.length / 2)] || 0;
+  const recentMean = recentErrors.reduce((a, b) => a + b, 0) / recentErrors.length;
+  const recentVariance = recentErrors.reduce((a, b) => a + Math.pow(b - recentMean, 2), 0) / recentErrors.length;
+  const recentSD = Math.sqrt(recentVariance);
+  
+  const rules = JITTER_DEMOTION_RULES;
+  const shouldDemote = recentAcc < rules.accuracy || 
+                       recentMedian > rules.medianCents || 
+                       recentSD > rules.sdCents;
+  
+  if (shouldDemote) {
+    const newLevel = Math.max(0, currentLevel - 1);
+    state.jitterLevels[pc] = newLevel;
+    console.log(`JITTER_LEVEL pc=${pc} from JL${currentLevel}→JL${newLevel} (acc=${(recentAcc*100).toFixed(0)}%, median=${recentMedian.toFixed(0)}¢, SD=${recentSD.toFixed(0)}¢)`);
+    save();
+  }
+}
+
+// Generate jitter for a note based on its level
+function generateJitterForNote(pc, isProbe = false) {
+  initializeJitterLevel(pc);
+  const level = state.jitterLevels[pc];
+  const config = JITTER_LEVELS[level];
+  
+  if (isProbe) {
+    // Probe: ±25-40¢ range (outside normal jitter range)
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    return sign * (25 + Math.random() * 15); // 25-40 cents
+  } else {
+    // Regular jitter based on level
+    const [min, max] = config.jitterRange;
+    const sign = Math.random() < 0.5 ? -1 : 1;
+    return sign * (min + Math.random() * (max - min));
+  }
+}
+
+// Check if should use probe for this note
+function shouldUseProbe(pc) {
+  initializeJitterLevel(pc);
+  const level = state.jitterLevels[pc];
+  const config = JITTER_LEVELS[level];
+  return Math.random() < config.probeRate;
+}
+
+// Check if should use anchor (0¢) for this note
+function shouldUseAnchor(pc) {
+  initializeJitterLevel(pc);
+  const level = state.jitterLevels[pc];
+  const config = JITTER_LEVELS[level];
+  return Math.random() < config.anchorRate;
+}
+
+// Get jitter info for a trial
+function getJitterInfo(pc) {
+  const isAnchor = shouldUseAnchor(pc);
+  if (isAnchor) {
+    return {
+      jitter: 0,
+      isAnchor: true,
+      isProbe: false,
+      level: state.jitterLevels[pc] || 0
+    };
+  }
+  
+  const isProbe = shouldUseProbe(pc);
+  const jitter = generateJitterForNote(pc, isProbe);
+  
+  return {
+    jitter: jitter,
+    isAnchor: false,
+    isProbe: isProbe,
+    level: state.jitterLevels[pc] || 0
+  };
+}
+
+// Debug function to show jitter status table
+window.jitterStatus = function() {
+  console.log('=== JITTER STATUS ===');
+  console.log('PC\tJL\tJitter Range\tAnchors%\tProbes%\tLast-40 Acc\tMedian¢\tSD¢');
+  
+  PC.forEach(pc => {
+    initializeJitterLevel(pc);
+    initializeNoteStats(pc);
+    
+    const level = state.jitterLevels[pc];
+    const config = JITTER_LEVELS[level];
+    const stats = state.noteStats[pc];
+    
+    const jitterRange = `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`;
+    const anchorsPercent = `${(config.anchorRate * 100).toFixed(1)}%`;
+    const probesPercent = `${(config.probeRate * 100).toFixed(1)}%`;
+    const accuracy = stats.trials.length > 0 ? `${(stats.accuracy * 100).toFixed(0)}%` : 'N/A';
+    const medianCents = stats.trials.length > 0 ? `${stats.medianError.toFixed(0)}¢` : 'N/A';
+    const sdCents = stats.trials.length > 0 ? `${stats.sdError.toFixed(0)}¢` : 'N/A';
+    
+    console.log(`${pc}\t${config.name}\t${jitterRange}\t\t${anchorsPercent}\t\t${probesPercent}\t\t${accuracy}\t\t${medianCents}\t${sdCents}`);
+  });
+};
 
 const OOB_RATE=0.25; // Keep as fallback, but use adaptive rate
 const SESS_DAILY_MS=30*60*1000; // Changed from 20 to 30 minutes
@@ -1159,164 +1421,9 @@ async function playFlappySound(){
   }catch(_e){}
 }
 
-/* ------------------ JITTER SYSTEM ------------------ */
-// Jitter Level Constants
-const JITTER_LEVELS = {
-  JL0: { // Onboarding (new pitch or new timbre)
-    jitterRange: [-8, 8], // ±3-8¢
-    probeRate: 0.08, // Raised to ~8% (bounded by global 10%)
-    probeRange: [-30, 30], // ±25-40¢
-    anchorRate: 0.15, // 15% anchors (0¢) - ensures 2-3 per 20 trials
-    promoteAcc: 0.75,
-    promoteMedian: 20,
-    trials: 40
-  },
-  JL1: { // Early stable
-    jitterRange: [-10, 10], // ±5-10¢
-    probeRate: 0.09, // Raised to ~9%
-    probeRange: [-35, 35],
-    anchorRate: 0.12, // 12% anchors (0¢) - ensures 2-3 per 20 trials
-    promoteAcc: 0.80,
-    promoteMedian: 15,
-    trials: 40
-  },
-  JL2: { // Mid stable
-    jitterRange: [-15, 15], // ±5-15¢
-    probeRate: 0.10, // Raised to ~10%
-    probeRange: [-40, 40],
-    anchorRate: 0.10, // 10% anchors (0¢) - ensures 2 per 20 trials
-    promoteAcc: 0.90,
-    promoteMedian: 10,
-    promoteSD: 15,
-    trials: 40
-  },
-  JL3: { // Mature
-    jitterRange: [-15, 15], // ±5-15¢ (global default)
-    probeRate: 0.12, // Raised to ~12% (bounded by global ~10%)
-    probeRange: [-40, 40],
-    anchorRate: 0.10, // 10% anchors (0¢) - ensures 2 per 20 trials
-    demoteAcc: 0.75,
-    demoteMedian: 25,
-    demoteSD: 30,
-    trials: 20
-  }
-};
 
-function initializeJitterLevel(note) {
-  if (!state.jitterLevels) state.jitterLevels = {};
-  if (!state.jitterLevels[note]) {
-    state.jitterLevels[note] = 'JL0'; // Start at onboarding level
-  }
-  if (!state.noteStats) state.noteStats = {};
-  if (!state.noteStats[note]) {
-    state.noteStats[note] = {
-      trials: [],
-      accuracy: 0,
-      medianError: 0,
-      stdDev: 0,
-      lastUpdated: Date.now()
-    };
-  }
-}
 
-function updateNoteStats(note, isCorrect, centsError = 0) {
-  initializeJitterLevel(note);
-  
-  const stats = state.noteStats[note];
-  const trial = {
-    correct: isCorrect,
-    centsError: centsError,
-    timestamp: Date.now()
-  };
-  
-  // Add trial and maintain rolling window
-  stats.trials.push(trial);
-  const maxTrials = 40; // Rolling window size
-  if (stats.trials.length > maxTrials) {
-    stats.trials = stats.trials.slice(-maxTrials);
-  }
-  
-  // Calculate rolling statistics
-  const recentTrials = stats.trials.slice(-maxTrials);
-  stats.accuracy = recentTrials.filter(t => t.correct).length / recentTrials.length;
-  
-  // Calculate median error and standard deviation
-  const errors = recentTrials.map(t => Math.abs(t.centsError || 0));
-  errors.sort((a, b) => a - b);
-  stats.medianError = errors.length > 0 ? errors[Math.floor(errors.length / 2)] : 0;
-  
-  const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
-  const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
-  stats.stdDev = Math.sqrt(variance);
-  
-  stats.lastUpdated = Date.now();
-  
-  // Check for level promotion/demotion
-  updateJitterLevel(note);
-  save();
-}
 
-function updateJitterLevel(note) {
-  const currentLevel = state.jitterLevels[note];
-  const stats = state.noteStats[note];
-  const config = JITTER_LEVELS[currentLevel];
-  
-  if (!stats || stats.trials.length < 20) return; // Need minimum trials
-  
-  switch (currentLevel) {
-    case 'JL0':
-      if (stats.accuracy >= config.promoteAcc && stats.medianError <= config.promoteMedian && stats.trials.length >= config.trials) {
-        state.jitterLevels[note] = 'JL1';
-      }
-      break;
-    case 'JL1':
-      if (stats.accuracy >= config.promoteAcc && stats.medianError <= config.promoteMedian) {
-        state.jitterLevels[note] = 'JL2';
-      } else if (stats.accuracy < 0.60 || stats.medianError > 30) {
-        state.jitterLevels[note] = 'JL0'; // Demote to rescue
-      }
-      break;
-    case 'JL2':
-      if (stats.accuracy >= config.promoteAcc && stats.medianError <= config.promoteMedian && stats.stdDev <= config.promoteSD) {
-        state.jitterLevels[note] = 'JL3';
-      } else if (stats.accuracy < 0.75 || stats.medianError > 25) {
-        state.jitterLevels[note] = 'JL1';
-      }
-      break;
-    case 'JL3':
-      if (stats.accuracy < config.demoteAcc || stats.medianError > config.demoteMedian || stats.stdDev > config.demoteSD) {
-        state.jitterLevels[note] = 'JL2'; // Demote one level
-      }
-      break;
-  }
-}
-
-function calculateJitter(note, isProbe = false) {
-  initializeJitterLevel(note);
-  
-  const level = state.jitterLevels[note];
-  const config = JITTER_LEVELS[level];
-  
-  if (isProbe) {
-    // Boundary probe
-    const range = config.probeRange;
-    const sign = Math.random() < 0.5 ? -1 : 1;
-    const min = Math.abs(range[0]) * 0.6; // 25¢ minimum
-    const max = Math.abs(range[1]); // 40¢ maximum
-    return sign * (min + Math.random() * (max - min));
-  } else {
-    // Regular jitter
-    const range = config.jitterRange;
-    return range[0] + Math.random() * (range[1] - range[0]);
-  }
-}
-
-function shouldUseProbe(note) {
-  initializeJitterLevel(note);
-  const level = state.jitterLevels[note];
-  const config = JITTER_LEVELS[level];
-  return Math.random() < config.probeRate;
-}
 
 function selectInBoundsNote(usableNotes) {
   if (usableNotes.length === 0) return 'F'; // Fallback
@@ -2740,44 +2847,12 @@ async function nextTrial(forceNew=false){
     }
     
     // Apply jitter system for in-bounds trials only
-    let appliedJitter = 0;
-    let isProbe = false;
-    let isAnchor = false;
     if (!isOOBTrial) {
       // Initialize jitter level for this note if needed
       initializeJitterLevel(truePc);
       
-      const level = state.jitterLevels[truePc];
-      const config = JITTER_LEVELS[level];
-      
-      // Ensure 2-3 anchors per 20 trials (10-15% rate) - independent of probes
-      const anchorRate = config.anchorRate || 0.10; // Default 10% if not specified
-      const shouldAnchor = Math.random() < anchorRate;
-      
-      if (shouldAnchor) {
-        isAnchor = true;
-        appliedJitter = 0; // 0¢ anchor
-      } else {
-        // Global probe rate limiting (~10%)
-        const globalProbeRate = 0.10;
-        const shouldProbe = Math.random() < globalProbeRate;
-        
-        if (shouldProbe) {
-          isProbe = true;
-          appliedJitter = calculateJitter(truePc, true); // Boundary probe
-        } else {
-          // Regular jitter
-          appliedJitter = calculateJitter(truePc, false);
-        }
-      }
-      
-      // Store jitter info for this trial
-      currentTrialJitter = {
-        jitter: appliedJitter,
-        isProbe: isProbe,
-        isAnchor: isAnchor,
-        level: state.jitterLevels[truePc]
-      };
+      // Get jitter info using new system
+      currentTrialJitter = getJitterInfo(truePc);
     } else {
       // OOB trials have no jitter (0¢ detune, stationary)
       currentTrialJitter = {
@@ -2788,7 +2863,7 @@ async function nextTrial(forceNew=false){
       };
     }
     
-    await playSample(currentNote, appliedJitter);
+    await playSample(currentNote, currentTrialJitter.jitter);
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
@@ -2861,6 +2936,12 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     // Update confusion matrix if incorrect
     if (!ok && guessLabel !== 'OOB' && guessLabel !== truePc) {
       updateConfusionMatrix(truePc, guessLabel);
+    }
+    
+    // Check for jitter level changes every few trials
+    if (state.levelTrials % 5 === 0) {
+      checkJitterPromotion(truePc);
+      checkJitterDemotion(truePc);
     }
   }
   
@@ -4031,46 +4112,21 @@ function simSelectOctaveForNote(pc) {
 }
 
 function simInitializeJitterLevel(pc) {
-  // Use existing jitter initialization logic if available
-  if (typeof initializeJitterLevelsForNote === 'function') {
-    return initializeJitterLevelsForNote(pc);
-  }
-  // Fallback: initialize to JL1
-  if (!state.jitterLevels) state.jitterLevels = {};
-  if (!(pc in state.jitterLevels)) {
-    state.jitterLevels[pc] = 1; // Default to JL1
-  }
+  // Use existing jitter initialization logic
+  return initializeJitterLevel(pc);
 }
 
 function simShouldUseProbe(pc) {
   return withSimulatedRandom(() => {
-    // Look for existing probe logic
-    if (typeof needsProbe === 'function') {
-      return needsProbe(pc);
-    }
-    // Fallback: 5% chance of probe
-    return Math.random() < 0.05;
+    // Use existing probe logic
+    return shouldUseProbe(pc);
   });
 }
 
 function simCalculateJitter(pc, isProbe) {
   return withSimulatedRandom(() => {
-    // Use existing jitter calculation if available
-    if (typeof generateJitter === 'function') {
-      return generateJitter(pc, isProbe);
-    }
-    // Fallback jitter calculation
-    if (isProbe) {
-      // Probe: ±25-40¢ range
-      const sign = Math.random() < 0.5 ? -1 : 1;
-      return sign * (25 + Math.random() * 15); // 25-40 cents
-    } else {
-      // Regular jitter: ±5-15¢ based on level
-      const level = state.jitterLevels[pc] || 1;
-      const maxJitter = Math.min(15, 5 + level * 3);
-      const sign = Math.random() < 0.5 ? -1 : 1;
-      return sign * Math.random() * maxJitter;
-    }
+    // Use existing jitter calculation
+    return generateJitterForNote(pc, isProbe);
   });
 }
 
@@ -4096,31 +4152,8 @@ function simulateTrial(set, blockNum, trialNum) {
       // Initialize jitter level if needed
       simInitializeJitterLevel(truePc);
       
-      const level = state.jitterLevels[truePc];
-      const config = JITTER_LEVELS[level];
-      
-      // Use the same anchor/probe logic as real training
-      const anchorRate = config.anchorRate || 0.10;
-      const shouldAnchor = withSimulatedRandom(() => Math.random() < anchorRate);
-      
-      let isProbe = false;
-      let jitter = 0;
-      
-      if (shouldAnchor) {
-        // Anchor trial: 0¢ jitter
-        jitter = 0;
-      } else {
-        // Check for probe
-        isProbe = simShouldUseProbe(truePc);
-        jitter = simCalculateJitter(truePc, isProbe);
-      }
-      
-      jitterInfo = {
-        jitter: jitter,
-        isProbe: isProbe,
-        isAnchor: shouldAnchor,
-        level: level
-      };
+      // Use the new jitter system
+      jitterInfo = withSimulatedRandom(() => getJitterInfo(truePc));
     }
     
     // Get learner response
@@ -4149,7 +4182,27 @@ function simulateTrial(set, blockNum, trialNum) {
     }
     
     // Record in app state (simulate recordTrial call)
-    recordTrial(response.guess, response.correct, false, wasOOB);
+    // Set global variables that recordTrial depends on
+    const origCurrentNote = typeof currentNote !== 'undefined' ? currentNote : null;
+    const origTruePc = typeof truePc !== 'undefined' ? truePc : null;
+    const origIsOOBTrial = typeof isOOBTrial !== 'undefined' ? isOOBTrial : null;
+    const origCurrentTrialJitter = typeof currentTrialJitter !== 'undefined' ? currentTrialJitter : null;
+    
+    // Set simulation values
+    window.currentNote = currentNote;
+    window.truePc = truePc;
+    window.isOOBTrial = wasOOB;
+    window.currentTrialJitter = jitterInfo;
+    
+    try {
+      recordTrial(response.guess, response.correct, false, wasOOB);
+    } finally {
+      // Restore original values
+      if (origCurrentNote !== null) window.currentNote = origCurrentNote;
+      if (origTruePc !== null) window.truePc = origTruePc;
+      if (origIsOOBTrial !== null) window.isOOBTrial = origIsOOBTrial;
+      if (origCurrentTrialJitter !== null) window.currentTrialJitter = origCurrentTrialJitter;
+    }
     
     return trialData;
   });
@@ -4202,6 +4255,10 @@ window.runSimWeek = function(opts = {}) {
         oob: { 3: 0, 4: 0, 5: 0 }
       };
       
+      // Track windowed octave gates (trials 8-12, 16-20, 20-24 per block) 
+      const octaveWindows = [];
+      let currentWindowTrials = [];
+      
       // Simulate cold recall at start of day
       const coldRecall = simulateRecall('cold');
       
@@ -4213,6 +4270,26 @@ window.runSimWeek = function(opts = {}) {
           
           // Collect statistics
           dayTotalTrials++;
+          currentWindowTrials.push(trialData);
+          
+          // Check octave windows (trials 8-12, 16-20, 20-24)
+          const trialInBlock = ((trial - 1) % trialsPerBlock) + 1;
+          if ((trialInBlock >= 8 && trialInBlock <= 12) || 
+              (trialInBlock >= 16 && trialInBlock <= 20) || 
+              (trialInBlock >= 20 && trialInBlock <= 24)) {
+            if (currentWindowTrials.length >= 5) { // Capture windows of 5 trials
+              const windowOctaves = currentWindowTrials.slice(-5).map(t => t.octave);
+              const centerCount = windowOctaves.filter(o => o === 4).length;
+              const neighborCount = windowOctaves.filter(o => o !== 4).length;
+              octaveWindows.push({
+                block: block,
+                window: `${trialInBlock-4}-${trialInBlock}`,
+                centerCount: centerCount,
+                neighborCount: neighborCount,
+                centerRatio: centerCount / 5
+              });
+            }
+          }
           
           if (trialData.isOOB) {
             dayOobTrials++;
@@ -4238,12 +4315,30 @@ window.runSimWeek = function(opts = {}) {
         
         // Trigger block boundary logic every 3 blocks
         if (block % 3 === 0) {
-          // Force OOB adaptation logic to run
+          // Trigger actual OOB adaptation logic during simulation
           const blockIndex = (day - 1) * dailyBlocks + block;
-          const currentOobRate = state.oobStats?.adaptiveRate ?? 0.18;
+          const oldRate = state.oobStats?.adaptiveRate ?? 0.18;
+          
+          // Temporarily set levelIndex for adaptation function
+          const originalLevelIndex = state.levelIndex;
+          state.levelIndex = blockIndex;
+          
+          // Call the real adaptation function
+          withSimulatedRandom(() => {
+            if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== blockIndex) {
+              adaptOOBTarget();
+              state.oobStats.lastAdaptedBlock = blockIndex;
+            }
+          });
+          
+          // Restore original levelIndex
+          state.levelIndex = originalLevelIndex;
+          
+          const newRate = state.oobStats?.adaptiveRate ?? 0.18;
           oobSeries.push({
             block: blockIndex,
-            targetPct: Math.round(currentOobRate * 1000) / 10
+            targetPct: Math.round(newRate * 1000) / 10,
+            rateChanged: Math.abs(newRate - oldRate) > 0.001
           });
         }
       }
@@ -4274,6 +4369,7 @@ window.runSimWeek = function(opts = {}) {
         probesPct: dayTotalTrials > 0 ? Math.round((dayProbes / dayTotalTrials) * 1000) / 10 : 0,
         jitterPct: dayTotalTrials > 0 ? Math.round((dayJittered / dayTotalTrials) * 1000) / 10 : 0,
         octaveCounts: octaveCounts,
+        octaveWindows: octaveWindows,
         last60InBoundsAcc: last60Acc,
         cold: coldRecall,
         warm: warmRecall
@@ -4282,23 +4378,83 @@ window.runSimWeek = function(opts = {}) {
     
     // Generate final summary statistics
     const perPitchStats = {};
+    const jitterLevelsSnapshot = {};
+    
     PC.forEach(pc => {
       const pcTrials = rawTrials.filter(t => t.pc === pc && !t.isOOB);
+      
+      // Capture final jitter level for this pitch
+      jitterLevelsSnapshot[pc] = state.jitterLevels?.[pc] || 0;
+      
       if (pcTrials.length > 0) {
         const anchors = pcTrials.filter(t => t.anchor).length;
         const probes = pcTrials.filter(t => t.probe).length;
         const jittered = pcTrials.filter(t => t.detuneCents !== 0 && !t.probe && !t.anchor).length;
-        const totalCents = pcTrials.reduce((sum, t) => sum + Math.abs(t.detuneCents), 0);
+        const centsErrors = pcTrials.map(t => Math.abs(t.detuneCents || 0));
+        const totalCents = centsErrors.reduce((sum, cents) => sum + cents, 0);
+        
+        // Calculate median and SD
+        centsErrors.sort((a, b) => a - b);
+        const median = centsErrors[Math.floor(centsErrors.length / 2)] || 0;
+        const mean = totalCents / centsErrors.length;
+        const variance = centsErrors.reduce((sum, cents) => sum + Math.pow(cents - mean, 2), 0) / centsErrors.length;
+        const stdDev = Math.sqrt(variance);
         
         perPitchStats[pc] = {
           tones: pcTrials.length,
           anchorsPercent: Math.round((anchors / pcTrials.length) * 1000) / 10,
           probesPercent: Math.round((probes / pcTrials.length) * 1000) / 10,
           jitterPercent: Math.round((jittered / pcTrials.length) * 1000) / 10,
-          meanAbsCents: Math.round((totalCents / pcTrials.length) * 10) / 10
+          meanAbsCents: Math.round(mean * 10) / 10,
+          medianCents: Math.round(median * 10) / 10,
+          sdCents: Math.round(stdDev * 10) / 10,
+          finalJitterLevel: jitterLevelsSnapshot[pc]
+        };
+      } else {
+        perPitchStats[pc] = {
+          tones: 0,
+          anchorsPercent: 0,
+          probesPercent: 0,
+          jitterPercent: 0,
+          meanAbsCents: 0,
+          medianCents: 0,
+          sdCents: 0,
+          finalJitterLevel: jitterLevelsSnapshot[pc]
         };
       }
     });
+    
+    // Generate confusion pair analysis
+    const confusionPairs = [];
+    Object.keys(simConfusionMatrix).forEach(truePc => {
+      Object.keys(simConfusionMatrix[truePc] || {}).forEach(guessPc => {
+        const count = simConfusionMatrix[truePc][guessPc];
+        if (count > 0 && truePc !== guessPc) {
+          confusionPairs.push({
+            truePc: truePc,
+            guessPc: guessPc,
+            count: count
+          });
+        }
+      });
+    });
+    confusionPairs.sort((a, b) => b.count - a.count);
+    
+    // Calculate OOB series with correct block numbers (3, 6, 9, 12...)
+    const enhancedOobSeries = [];
+    for (let day = 1; day <= days; day++) {
+      for (let block = 3; block <= dailyBlocks; block += 3) {
+        const globalBlock = (day - 1) * dailyBlocks + block;
+        const targetPct = state.oobStats?.adaptiveRate ? 
+          Math.round(state.oobStats.adaptiveRate * 1000) / 10 : 18.0;
+        enhancedOobSeries.push({
+          day: day,
+          block: block,
+          globalBlock: globalBlock,
+          targetPct: targetPct
+        });
+      }
+    }
     
     // Build final result
     const result = {
@@ -4308,8 +4464,10 @@ window.runSimWeek = function(opts = {}) {
       seed: seed,
       perDay: perDayData,
       confusionMatrix: simConfusionMatrix,
+      confusionPairs: confusionPairs,
       perPitch: perPitchStats,
-      oobSeries: oobSeries,
+      jitterLevelsSnapshot: jitterLevelsSnapshot,
+      oobSeries: enhancedOobSeries,
       raw: {
         trialsTail: rawTrials
       }
