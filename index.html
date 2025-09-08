@@ -4182,7 +4182,27 @@ function simulateTrial(set, blockNum, trialNum) {
     }
     
     // Record in app state (simulate recordTrial call)
-    recordTrial(response.guess, response.correct, false, wasOOB);
+    // Set global variables that recordTrial depends on
+    const origCurrentNote = typeof currentNote !== 'undefined' ? currentNote : null;
+    const origTruePc = typeof truePc !== 'undefined' ? truePc : null;
+    const origIsOOBTrial = typeof isOOBTrial !== 'undefined' ? isOOBTrial : null;
+    const origCurrentTrialJitter = typeof currentTrialJitter !== 'undefined' ? currentTrialJitter : null;
+    
+    // Set simulation values
+    window.currentNote = currentNote;
+    window.truePc = truePc;
+    window.isOOBTrial = wasOOB;
+    window.currentTrialJitter = jitterInfo;
+    
+    try {
+      recordTrial(response.guess, response.correct, false, wasOOB);
+    } finally {
+      // Restore original values
+      if (origCurrentNote !== null) window.currentNote = origCurrentNote;
+      if (origTruePc !== null) window.truePc = origTruePc;
+      if (origIsOOBTrial !== null) window.isOOBTrial = origIsOOBTrial;
+      if (origCurrentTrialJitter !== null) window.currentTrialJitter = origCurrentTrialJitter;
+    }
     
     return trialData;
   });
