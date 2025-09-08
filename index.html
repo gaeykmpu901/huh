@@ -1318,12 +1318,9 @@ state.counters ??= {
   inbTrialIndex: state.trials?.filter(t => !t.oob && t.correct !== undefined).length || 0,         // in-bounds only
   timeBlockIndex: Math.min(5, Math.floor(((state.minutesToday || 0) % 30) / 6) + 1),        // 1..5 today
   globalTimeBlockIndex: Math.floor((state.minutesToday || 0) / 6),  // increases across days
-  qBlockIndex: 0,           // Math.floor(inbTrialIndex/20)+1
+  qBlockIndex: Math.floor((state.trials?.filter(t => !t.oob && t.correct !== undefined).length || 0) / 20) + 1,
   lastOOBAdaptAt: { globalTimeBlockIndex: 0, inbTrialIndex: 0 }
 };
-
-// Calculate qBlockIndex properly
-state.counters.qBlockIndex = Math.floor(state.counters.inbTrialIndex / 20) + 1;
 
 // Maintain backward compatibility
 state.trialIndex ??= state.counters.trialIndex;
@@ -1331,9 +1328,10 @@ state.inbTrialIndex ??= state.counters.inbTrialIndex;
 state.qBlockIndex ??= state.counters.qBlockIndex;
 state.timeBlockIndex ??= state.counters.timeBlockIndex;
 state.globalTimeBlockIndex ??= state.counters.globalTimeBlockIndex;
-state.lastOOBAdaptAt ??= { inbTrialIndex: 0, globalTimeBlockIndex: 0 };
+state.lastOOBAdaptAt ??= state.counters.lastOOBAdaptAt;
+
+// Initialize octave tracking properly (preserve existing, ensure QA)
 state.oobSeries ??= [];
-// Preserve existing octaveStats structure and add unified tracking fields
 if (!state.octaveStats || typeof state.octaveStats !== 'object') {
   state.octaveStats = { inBounds: {3:0, 4:0, 5:0}, oob: {3:0, 4:0, 5:0} };
 } else {
@@ -1341,16 +1339,6 @@ if (!state.octaveStats || typeof state.octaveStats !== 'object') {
   state.octaveStats.oob ??= {3:0, 4:0, 5:0};
 }
 state.mirrorDiffPerBlock ??= [];
-
-// Add centralized state.counters as specified in problem statement
-state.counters ??= {
-  trialIndex: state.trialIndex || 0,            // all trials (in-bounds + OOB)
-  inbTrialIndex: state.inbTrialIndex || 0,      // in-bounds only (graded)
-  timeBlockIndex: state.timeBlockIndex || 0,    // 1..5 for today
-  globalTimeBlockIndex: state.globalTimeBlockIndex || 0, // increases across days
-  qBlockIndex: state.qBlockIndex || 0,          // = Math.floor(inbTrialIndex/20)+1
-  lastOOBAdaptAt: state.lastOOBAdaptAt || { globalTimeBlockIndex: 0, inbTrialIndex: 0 }
-};
 
 // Initialize QA tracking structures as specified
 state.qa ??= {};
@@ -3617,7 +3605,7 @@ function updateDetuneShares(trialData) {
     
     if (!state.jitter.perPitch[pc]) {
       state.jitter.perPitch[pc] = {
-        JL: trialData.jlLevel || 0,
+        JL: trialData.jl || 0,
         lastNTrials: [],
         accuracy: 0,
         medianCents: 0,
@@ -3721,7 +3709,7 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
                (!currentTrialJitter ? "anchor" :
                 currentTrialJitter.isAnchor ? "anchor" :
                 currentTrialJitter.isProbe ? "probe" : "jitter"),
-    jlLevel: !isOOBTrial && truePc ? (state.jitterLevels?.[truePc] ?? 0) : null, // JL level for this pitch
+    jl: !isOOBTrial && truePc ? (state.jitterLevels?.[truePc] ?? 0) : null, // JL level for this pitch (0-3)
     isOOB: isOOBTrial,
     truePc: truePc,
     guessPc: oobChosen ? null : (guessLabel === 'TARGET' ? truePc : guessLabel),
@@ -5382,7 +5370,8 @@ window.runSimWeek = function(opts = {}) {
             cents: trialData.isOOB ? 0 : (trialData.detuneCents || 0),
             detuneMode: detuneMode, // Use detuneMode as specified in problem statement
             isOOB: trialData.isOOB,
-            timbre: "piano" // Default timbre for simulation
+            timbre: "piano", // Default timbre for simulation
+            jl: trialData.isOOB ? null : (state.jitterLevels?.[trialData.pc] ?? 0) // JL level 0-3 for in-bounds tones
           };
           out.tones.push(toneRecord);
           
