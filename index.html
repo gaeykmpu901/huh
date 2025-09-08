@@ -1217,6 +1217,7 @@ try{
     assessmentScores: [],
     theme: 'default',
     flappySoundEnabled: true,
+    awaitingInput: false, // Track when input should be accepted
     // New state for enhanced features
     sessionBreakTime: 0, // Time when next break should occur
     lastBreakTime: 0, // Time of last break
@@ -1243,8 +1244,15 @@ try{
     mirrorDiffPerBlock: [] // Per-block mirror difference in percentage points
   };
 } catch(e){
-  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, sessions:[], trials:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO };
+  state = { userName:null, levelIndex:1, levelTrials:0, levelCorrect:0, sessions:[], trials:[], tones:[], startDate:null, lockoutUntil:null, capResetAt:null, testFailStreak:0, suggestShownSet:null, lastSeen:null, flappyHighScore:0, thisWeekIdx:0, thisWeekMs:0, levelFailCounts:{}, specialRanForLevel:null, audioType: AUDIO_TYPES.PIANO, awaitingInput: false };
 }
+
+// Initialize QA arrays for recording as specified in problem statement
+window.qa = window.qa || {};
+qa.tones = qa.tones || [];
+qa.trials = qa.trials || [];
+qa.oobSeries = qa.oobSeries || [];
+
 // Migration for audioType
 if (!state.audioType) {
   state.audioType = AUDIO_TYPES.PIANO;
@@ -1282,6 +1290,11 @@ if (state.sessionBreakTime === undefined) {
   state.varietyModeEnabled = false;
   state.octaveWindowMetrics = [];
   state.weightsTrace = [];
+  save();
+}
+// Migration for awaitingInput state tracking
+if (state.awaitingInput === undefined) {
+  state.awaitingInput = false;
   save();
 }
 
@@ -3007,6 +3020,23 @@ function updateLevelUI(){
   }
 }
 
+/* Enable/disable guess buttons based on trial state */
+function enableGuessButtons(mode) {
+  // Get all pitch buttons and OOB button
+  const pitchButtons = document.querySelectorAll('[data-guess]');
+  const oobButton = document.querySelector('[data-oob]');
+  
+  if (mode === "off") {
+    // Disable ALL guess buttons
+    pitchButtons.forEach(btn => btn.disabled = true);
+    if (oobButton) oobButton.disabled = true;
+  } else if (mode === "inb" || mode === "oob") {
+    // Enable ALL pitch buttons and OOB button
+    pitchButtons.forEach(btn => btn.disabled = false);
+    if (oobButton) oobButton.disabled = false;
+  }
+}
+
 /* Build note pad and attach handlers */
 function paintNotes(){
   const pad=byId('notePad'); if(!pad) return; pad.innerHTML='';
@@ -3016,15 +3046,14 @@ function paintNotes(){
   for(const pc of sorted){
     const b=document.createElement('button');
     b.textContent=pcLabel(pc);
-    b.dataset.pc=pc;
+    b.dataset.guess=pc; // Use data-guess as specified
     b.className='note';
     b.type='button';
-    b.addEventListener('click', ()=> guess(pc));
     pad.appendChild(b);
   }
   safe('btnOOB', el=> {
     el.style.display = set>=12 ? 'none' : 'block';
-    el.onclick = ()=> chooseOOB();
+    el.dataset.oob = "1"; // Use data-oob as specified
   });
 }
 
@@ -3441,26 +3470,72 @@ function drawTrackerChart() {
 /* -------- Normal trials -------- */
 function guess(pc){
   if(!sessionActive || paused || special) return;
+  if(!state.awaitingInput) return; // Check input gating
   if(!currentNote){ return; }
-  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  const ok = (!isOOBTrial && pc === truePc);
-  recordTrial(pc, ok, false, false);
-  feedback(ok, ok ? undefined : (isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`));
-  currentNote = null; // Clear currentNote to prevent repeated guesses
-  advanceCheck();
-  scheduleAuto();
+  
+  // Immediately disable buttons and clear awaiting input state
+  state.awaitingInput = false;
+  enableGuessButtons("off");
+  
+  try {
+    if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
+    const ok = (!isOOBTrial && pc === truePc);
+    const rtMs = Math.round(performance.now() - (trialStartTime || performance.now()));
+    
+    // Record to QA arrays as specified in problem statement
+    qa.trials.push({
+      trueNote: currentNote,
+      truePc: truePc,
+      guess: ok ? currentNote : `${pc}${currentNote ? currentNote.slice(-1) : '4'}`,
+      guessPc: pc,
+      correct: ok,
+      oob: false,
+      rtMs: rtMs
+    });
+    
+    recordTrial(pc, ok, false, false);
+    feedback(ok, ok ? undefined : (isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`));
+    currentNote = null; // Clear currentNote to prevent repeated guesses
+    advanceCheck();
+    scheduleAuto();
+  } finally {
+    // Ensure buttons remain disabled even if something throws
+  }
 }
 function chooseOOB(){
   if(!sessionActive || paused || special) return;
+  if(!state.awaitingInput) return; // Check input gating
   if(!currentNote) return;
-  if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
-  const ok = isOOBTrial;
-  recordTrial('OOB', ok, false, true);
-  const msg = ok ? undefined : `Incorrect — ${pcLabel(truePc)}`;
-  feedback(ok, msg);
-  currentNote = null; // Clear currentNote to prevent repeated guesses
-  advanceCheck();
-  scheduleAuto();
+  
+  // Immediately disable buttons and clear awaiting input state
+  state.awaitingInput = false;
+  enableGuessButtons("off");
+  
+  try {
+    if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
+    const ok = isOOBTrial;
+    const rtMs = Math.round(performance.now() - (trialStartTime || performance.now()));
+    
+    // Record to QA arrays as specified in problem statement
+    qa.trials.push({
+      trueNote: currentNote,
+      truePc: truePc,
+      guess: null,
+      guessPc: null,
+      correct: ok,
+      oob: true,
+      rtMs: rtMs
+    });
+    
+    recordTrial('OOB', ok, false, true);
+    const msg = ok ? undefined : `Incorrect — ${pcLabel(truePc)}`;
+    feedback(ok, msg);
+    currentNote = null; // Clear currentNote to prevent repeated guesses
+    advanceCheck();
+    scheduleAuto();
+  } finally {
+    // Ensure buttons remain disabled even if something throws
+  }
 }
 
 /* Driving */
@@ -3531,6 +3606,17 @@ async function nextTrial(forceNew=false){
     };
     state.tones.push(toneRecord);
     
+    // Also record to QA array as specified in problem statement
+    qa.tones.push(toneRecord);
+    
+    // Set up input gating and enable buttons as specified
+    state.awaitingInput = true;
+    if (isOOBTrial) {
+      enableGuessButtons("oob");
+    } else {
+      enableGuessButtons("inb");
+    }
+    
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
@@ -3543,6 +3629,22 @@ async function nextTrial(forceNew=false){
 function handleTimeout(){
   if(!sessionActive || paused || special) return;
   if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
+  
+  // Disable buttons and clear awaiting input state on timeout
+  state.awaitingInput = false;
+  enableGuessButtons("off");
+  
+  // Record timeout trial to QA arrays
+  qa.trials.push({
+    trueNote: currentNote,
+    truePc: truePc,
+    guess: null,
+    guessPc: null,
+    correct: false,
+    oob: !!isOOBTrial,
+    rtMs: null
+  });
+  
   recordTrial(null,false,true);
   feedback(false, isOOBTrial ? 'Incorrect — Out of Bounds' : `Incorrect — ${pcLabel(truePc)}`);
   advanceCheck(); scheduleAuto();
@@ -3726,7 +3828,7 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     note: currentNote,
     pc: truePc,
     oct: currentNote ? parseInt(currentNote.slice(-1)) : null,
-    cents: !isOOBTrial && currentTrialJitter ? parseFloat(currentTrialJitter.jitter.toFixed(1)) : (isOOBTrial ? 0 : null),
+    cents: !isOOBTrial && currentTrialJitter ? parseFloat((currentTrialJitter.jitter || 0).toFixed(1)) : (isOOBTrial ? 0 : null),
     detuneMode: isOOBTrial ? "oob" : 
                (!currentTrialJitter ? "anchor" :
                 currentTrialJitter.isAnchor ? "anchor" :
@@ -4517,6 +4619,18 @@ function wireOnce(){
   safe('btnSkipRecall', el=> el.onclick=()=> skipRecallTest());
   safe('btnNextRecall', el=> el.onclick=()=> nextRecallNote());
   safe('btnFinishRecall', el=> el.onclick=()=> finishRecallTest());
+
+  
+  // Set up event listeners for guess buttons (data-guess and data-oob)
+  document.addEventListener('click', (e) => {
+    if (e.target.dataset.guess) {
+      e.preventDefault();
+      guess(e.target.dataset.guess);
+    } else if (e.target.dataset.oob) {
+      e.preventDefault();
+      chooseOOB();
+    }
+  });
 
   // Initial screen
   if(!state.userName){ showScreen('startScreen'); }
