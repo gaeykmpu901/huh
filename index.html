@@ -1206,7 +1206,7 @@ try{
     userName:null,
     levelIndex:1,
     levelTrials:0, levelCorrect:0,
-    sessions:[], trials:[],
+    sessions:[], trials:[], tones:[],
     startDate:null, lockoutUntil:null, capResetAt:null,
     testFailStreak:0, suggestShownSet:null,
     lastSeen:null, flappyHighScore:0,
@@ -1282,6 +1282,12 @@ if (state.sessionBreakTime === undefined) {
   state.varietyModeEnabled = false;
   state.octaveWindowMetrics = [];
   state.weightsTrace = [];
+  save();
+}
+
+// Migration for tones array (FIX 1)
+if (!state.tones) {
+  state.tones = [];
   save();
 }
 
@@ -2625,8 +2631,9 @@ function getInBoundsOctaveMixForBlock() {
 
 // Select octave for OOB note, mirroring in-bounds distribution
 function selectOctaveForOOBNote(note) {
-  // Use block-based octave mirroring
-  const inBoundsDistribution = getInBoundsOctaveMixForBlock();
+  // FIX 3: Use block-based octave mirroring from frozen snapshot as specified
+  // Use the frozen snapshot from beginTimeBlock()
+  const frozenMix = state.octaveSnapshotForOOB?.inBoundsMix || {3: 0, 4: 1, 5: 0};
   
   // Respect gating - don't sample octaves that aren't unlocked yet
   const unlockedOctaves = currentOctaves ? currentOctaves() : [3, 4, 5];
@@ -2637,8 +2644,8 @@ function selectOctaveForOOBNote(note) {
   
   unlockedOctaves.forEach(oct => {
     if (oct >= 3 && oct <= 5) {
-      availableDistribution[oct] = inBoundsDistribution[oct];
-      totalAvailable += inBoundsDistribution[oct];
+      availableDistribution[oct] = frozenMix[oct];
+      totalAvailable += frozenMix[oct];
     }
   });
   
@@ -3509,6 +3516,21 @@ async function nextTrial(forceNew=false){
     }
     
     await playSample(currentNote, currentTrialJitter.jitter);
+    
+    // FIX 1: Record tone presentation as specified in problem statement
+    const toneRecord = {
+      note: currentNote,
+      pc: truePc,
+      oct: currentNote ? parseInt(currentNote.slice(-1)) : null,
+      cents: isOOBTrial ? 0 : parseFloat((currentTrialJitter.jitter || 0).toFixed(1)),
+      detuneMode: isOOBTrial ? "oob" : 
+                 (currentTrialJitter.isAnchor ? "anchor" :
+                  currentTrialJitter.isProbe ? "probe" : "jitter"),
+      isOOB: isOOBTrial,
+      timbre: state.audioType || "piano"
+    };
+    state.tones.push(toneRecord);
+    
     if(rtTimer){ clearTimeout(rtTimer); rtTimer=null; }
     const baseRt = rtWindowForSet(setFromIndex(state.levelIndex));
     const rtms = baseRt + firstRtBonusMs + LATENCY_CUSHION_MS;
@@ -3739,12 +3761,14 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     };
   }
   
-  // Update octave statistics per glossary
+  // Update octave statistics per glossary (FIX 3)
   if (trialData.oct && (trialData.oct === 3 || trialData.oct === 4 || trialData.oct === 5)) {
     if (isOOBTrial) {
       state.octaveStats.oob[trialData.oct]++;
+      state.qa.octaves.oob[trialData.oct]++; // FIX 3: Update QA tracking
     } else {
       state.octaveStats.inBounds[trialData.oct]++;
+      state.qa.octaves.inBounds[trialData.oct]++; // FIX 3: Update QA tracking
     }
   }
   
@@ -5951,18 +5975,20 @@ window.QA.exportFull = function(opts = {}) {
   // Allow passing simulation data for analysis
   const simData = opts.simData;
   
-  let totalTrials, totalTones, trialsData;
+  let totalTrials, totalTones, trialsData, tonesData;
   
   if (simData) {
     // Use simulation data
     totalTrials = simData.trials?.length || 0;
     totalTones = simData.tones?.length || 0;
     trialsData = simData.trials || [];
+    tonesData = simData.tones || [];
   } else {
     // Use live state data
     totalTrials = state.trials.length;
-    totalTones = totalTrials; // Each trial has one tone presentation
+    totalTones = state.tones?.length || 0; // FIX 1: Use real tones array
     trialsData = state.trials;
+    tonesData = state.tones || [];
   }
   
   // Calculate OOB metrics
@@ -6017,7 +6043,7 @@ window.QA.exportFull = function(opts = {}) {
     },
     curriculum: state.qa.curriculum || { active: [], weights: {}, events: [] },
     tails: { 
-      tones: simData ? simData.tones?.slice(-400) || [] : trialsData.slice(-400), 
+      tones: simData ? simData.tones?.slice(-400) || [] : tonesData.slice(-400), 
       trials: trialsData.slice(-400)
     }
   };
