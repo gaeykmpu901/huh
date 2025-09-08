@@ -595,12 +595,16 @@ function shouldGenerateOOB(set) {
 function getAdaptiveOOBTarget() {
   const currentBlock = blockFromIndex(state.levelIndex);
   
-  // Check if we need to adapt (every 3 blocks)
-  if (currentBlock % 3 === 1) {
-    adaptOOBTarget();
+  // Check if we need to adapt (every 3 blocks) - only once per block
+  if (currentBlock % 3 === 0 && currentBlock > 0) {
+    // Only adapt if we haven't adapted this block yet
+    if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== currentBlock) {
+      adaptOOBTarget();
+      state.oobStats.lastAdaptedBlock = currentBlock;
+    }
   }
   
-  return state.oobStats.targetRate ?? 0.18;
+  return state.oobStats.adaptiveRate ?? 0.18;
 }
 
 // Adapt OOB target every 3 blocks based on last 60 in-bounds trials
@@ -618,7 +622,7 @@ function adaptOOBTarget() {
   const observedAcc = last60InBounds.filter(t => t.correct).length / last60InBounds.length;
   const observedAcc60 = Math.round(observedAcc * 100);
   
-  let newTarget = state.oobStats.targetRate ?? 0.18;
+  let newTarget = state.oobStats.adaptiveRate ?? 0.18;
   let reason = 'no-change';
   
   // Target policy: nudge toward 70-85% overall accuracy using ±3pp steps
@@ -647,7 +651,7 @@ function adaptOOBTarget() {
   const currentBlock = blockFromIndex(state.levelIndex);
   console.log(`OOB_ADAPT block=${currentBlock} last60_acc=${observedAcc60}% new_target=${Math.round(newTarget * 100)}%`);
   
-  state.oobStats.targetRate = newTarget;
+  state.oobStats.adaptiveRate = newTarget;
   save();
 }
 
@@ -864,7 +868,7 @@ state.oobStats ??= {};
 state.oobStats.oobTrials ??= [];
 state.oobStats.recentTrials ??= [];   // in-bounds only, 1/0
 state.oobStats.streakCount ??= 0;     // generation streak
-if (typeof state.oobStats.targetRate !== 'number') state.oobStats.targetRate = 0.18; // 18%
+if (typeof state.oobStats.adaptiveRate !== 'number') state.oobStats.adaptiveRate = 0.18; // 18%
 state.oobStats.maxInRow = 2;          // streak cap
 state.oobSeries ??= [];               // OOB adaptation log
 save();
@@ -4081,13 +4085,30 @@ function simulateTrial(set, blockNum, trialNum) {
       // Initialize jitter level if needed
       simInitializeJitterLevel(truePc);
       
-      const isProbe = simShouldUseProbe(truePc);
-      const jitter = simCalculateJitter(truePc, isProbe);
+      const level = state.jitterLevels[truePc];
+      const config = JITTER_LEVELS[level];
+      
+      // Use the same anchor/probe logic as real training
+      const anchorRate = config.anchorRate || 0.10;
+      const shouldAnchor = withSimulatedRandom(() => Math.random() < anchorRate);
+      
+      let isProbe = false;
+      let jitter = 0;
+      
+      if (shouldAnchor) {
+        // Anchor trial: 0¢ jitter
+        jitter = 0;
+      } else {
+        // Check for probe
+        isProbe = simShouldUseProbe(truePc);
+        jitter = simCalculateJitter(truePc, isProbe);
+      }
       
       jitterInfo = {
         jitter: jitter,
         isProbe: isProbe,
-        level: state.jitterLevels[truePc]
+        isAnchor: shouldAnchor,
+        level: level
       };
     }
     
@@ -4104,7 +4125,7 @@ function simulateTrial(set, blockNum, trialNum) {
       isOOB: wasOOB,
       detuneCents: Math.round(jitterInfo.jitter * 10) / 10,
       probe: jitterInfo.isProbe,
-      anchor: jitterInfo.jitter === 0 && !wasOOB,
+      anchor: jitterInfo.isAnchor || (jitterInfo.jitter === 0 && !wasOOB),
       ok: response.correct
     };
     
