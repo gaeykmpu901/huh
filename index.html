@@ -4235,6 +4235,10 @@ window.runSimWeek = function(opts = {}) {
         oob: { 3: 0, 4: 0, 5: 0 }
       };
       
+      // Track windowed octave gates (trials 8-12, 16-20, 20-24 per block) 
+      const octaveWindows = [];
+      let currentWindowTrials = [];
+      
       // Simulate cold recall at start of day
       const coldRecall = simulateRecall('cold');
       
@@ -4246,6 +4250,26 @@ window.runSimWeek = function(opts = {}) {
           
           // Collect statistics
           dayTotalTrials++;
+          currentWindowTrials.push(trialData);
+          
+          // Check octave windows (trials 8-12, 16-20, 20-24)
+          const trialInBlock = ((trial - 1) % trialsPerBlock) + 1;
+          if ((trialInBlock >= 8 && trialInBlock <= 12) || 
+              (trialInBlock >= 16 && trialInBlock <= 20) || 
+              (trialInBlock >= 20 && trialInBlock <= 24)) {
+            if (currentWindowTrials.length >= 5) { // Capture windows of 5 trials
+              const windowOctaves = currentWindowTrials.slice(-5).map(t => t.octave);
+              const centerCount = windowOctaves.filter(o => o === 4).length;
+              const neighborCount = windowOctaves.filter(o => o !== 4).length;
+              octaveWindows.push({
+                block: block,
+                window: `${trialInBlock-4}-${trialInBlock}`,
+                centerCount: centerCount,
+                neighborCount: neighborCount,
+                centerRatio: centerCount / 5
+              });
+            }
+          }
           
           if (trialData.isOOB) {
             dayOobTrials++;
@@ -4271,12 +4295,30 @@ window.runSimWeek = function(opts = {}) {
         
         // Trigger block boundary logic every 3 blocks
         if (block % 3 === 0) {
-          // Force OOB adaptation logic to run
+          // Trigger actual OOB adaptation logic during simulation
           const blockIndex = (day - 1) * dailyBlocks + block;
-          const currentOobRate = state.oobStats?.adaptiveRate ?? 0.18;
+          const oldRate = state.oobStats?.adaptiveRate ?? 0.18;
+          
+          // Temporarily set levelIndex for adaptation function
+          const originalLevelIndex = state.levelIndex;
+          state.levelIndex = blockIndex;
+          
+          // Call the real adaptation function
+          withSimulatedRandom(() => {
+            if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== blockIndex) {
+              adaptOOBTarget();
+              state.oobStats.lastAdaptedBlock = blockIndex;
+            }
+          });
+          
+          // Restore original levelIndex
+          state.levelIndex = originalLevelIndex;
+          
+          const newRate = state.oobStats?.adaptiveRate ?? 0.18;
           oobSeries.push({
             block: blockIndex,
-            targetPct: Math.round(currentOobRate * 1000) / 10
+            targetPct: Math.round(newRate * 1000) / 10,
+            rateChanged: Math.abs(newRate - oldRate) > 0.001
           });
         }
       }
@@ -4307,6 +4349,7 @@ window.runSimWeek = function(opts = {}) {
         probesPct: dayTotalTrials > 0 ? Math.round((dayProbes / dayTotalTrials) * 1000) / 10 : 0,
         jitterPct: dayTotalTrials > 0 ? Math.round((dayJittered / dayTotalTrials) * 1000) / 10 : 0,
         octaveCounts: octaveCounts,
+        octaveWindows: octaveWindows,
         last60InBoundsAcc: last60Acc,
         cold: coldRecall,
         warm: warmRecall
@@ -4315,23 +4358,83 @@ window.runSimWeek = function(opts = {}) {
     
     // Generate final summary statistics
     const perPitchStats = {};
+    const jitterLevelsSnapshot = {};
+    
     PC.forEach(pc => {
       const pcTrials = rawTrials.filter(t => t.pc === pc && !t.isOOB);
+      
+      // Capture final jitter level for this pitch
+      jitterLevelsSnapshot[pc] = state.jitterLevels?.[pc] || 0;
+      
       if (pcTrials.length > 0) {
         const anchors = pcTrials.filter(t => t.anchor).length;
         const probes = pcTrials.filter(t => t.probe).length;
         const jittered = pcTrials.filter(t => t.detuneCents !== 0 && !t.probe && !t.anchor).length;
-        const totalCents = pcTrials.reduce((sum, t) => sum + Math.abs(t.detuneCents), 0);
+        const centsErrors = pcTrials.map(t => Math.abs(t.detuneCents || 0));
+        const totalCents = centsErrors.reduce((sum, cents) => sum + cents, 0);
+        
+        // Calculate median and SD
+        centsErrors.sort((a, b) => a - b);
+        const median = centsErrors[Math.floor(centsErrors.length / 2)] || 0;
+        const mean = totalCents / centsErrors.length;
+        const variance = centsErrors.reduce((sum, cents) => sum + Math.pow(cents - mean, 2), 0) / centsErrors.length;
+        const stdDev = Math.sqrt(variance);
         
         perPitchStats[pc] = {
           tones: pcTrials.length,
           anchorsPercent: Math.round((anchors / pcTrials.length) * 1000) / 10,
           probesPercent: Math.round((probes / pcTrials.length) * 1000) / 10,
           jitterPercent: Math.round((jittered / pcTrials.length) * 1000) / 10,
-          meanAbsCents: Math.round((totalCents / pcTrials.length) * 10) / 10
+          meanAbsCents: Math.round(mean * 10) / 10,
+          medianCents: Math.round(median * 10) / 10,
+          sdCents: Math.round(stdDev * 10) / 10,
+          finalJitterLevel: jitterLevelsSnapshot[pc]
+        };
+      } else {
+        perPitchStats[pc] = {
+          tones: 0,
+          anchorsPercent: 0,
+          probesPercent: 0,
+          jitterPercent: 0,
+          meanAbsCents: 0,
+          medianCents: 0,
+          sdCents: 0,
+          finalJitterLevel: jitterLevelsSnapshot[pc]
         };
       }
     });
+    
+    // Generate confusion pair analysis
+    const confusionPairs = [];
+    Object.keys(simConfusionMatrix).forEach(truePc => {
+      Object.keys(simConfusionMatrix[truePc] || {}).forEach(guessPc => {
+        const count = simConfusionMatrix[truePc][guessPc];
+        if (count > 0 && truePc !== guessPc) {
+          confusionPairs.push({
+            truePc: truePc,
+            guessPc: guessPc,
+            count: count
+          });
+        }
+      });
+    });
+    confusionPairs.sort((a, b) => b.count - a.count);
+    
+    // Calculate OOB series with correct block numbers (3, 6, 9, 12...)
+    const enhancedOobSeries = [];
+    for (let day = 1; day <= days; day++) {
+      for (let block = 3; block <= dailyBlocks; block += 3) {
+        const globalBlock = (day - 1) * dailyBlocks + block;
+        const targetPct = state.oobStats?.adaptiveRate ? 
+          Math.round(state.oobStats.adaptiveRate * 1000) / 10 : 18.0;
+        enhancedOobSeries.push({
+          day: day,
+          block: block,
+          globalBlock: globalBlock,
+          targetPct: targetPct
+        });
+      }
+    }
     
     // Build final result
     const result = {
@@ -4341,8 +4444,10 @@ window.runSimWeek = function(opts = {}) {
       seed: seed,
       perDay: perDayData,
       confusionMatrix: simConfusionMatrix,
+      confusionPairs: confusionPairs,
       perPitch: perPitchStats,
-      oobSeries: oobSeries,
+      jitterLevelsSnapshot: jitterLevelsSnapshot,
+      oobSeries: enhancedOobSeries,
       raw: {
         trialsTail: rawTrials
       }
