@@ -2631,8 +2631,9 @@ function getInBoundsOctaveMixForBlock() {
 
 // Select octave for OOB note, mirroring in-bounds distribution
 function selectOctaveForOOBNote(note) {
-  // Use block-based octave mirroring
-  const inBoundsDistribution = getInBoundsOctaveMixForBlock();
+  // FIX 3: Use block-based octave mirroring from frozen snapshot as specified
+  // Use the frozen snapshot from beginTimeBlock()
+  const frozenMix = state.octaveSnapshotForOOB?.inBoundsMix || {3: 0, 4: 1, 5: 0};
   
   // Respect gating - don't sample octaves that aren't unlocked yet
   const unlockedOctaves = currentOctaves ? currentOctaves() : [3, 4, 5];
@@ -2643,8 +2644,8 @@ function selectOctaveForOOBNote(note) {
   
   unlockedOctaves.forEach(oct => {
     if (oct >= 3 && oct <= 5) {
-      availableDistribution[oct] = inBoundsDistribution[oct];
-      totalAvailable += inBoundsDistribution[oct];
+      availableDistribution[oct] = frozenMix[oct];
+      totalAvailable += frozenMix[oct];
     }
   });
   
@@ -3760,12 +3761,14 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
     };
   }
   
-  // Update octave statistics per glossary
+  // Update octave statistics per glossary (FIX 3)
   if (trialData.oct && (trialData.oct === 3 || trialData.oct === 4 || trialData.oct === 5)) {
     if (isOOBTrial) {
       state.octaveStats.oob[trialData.oct]++;
+      state.qa.octaves.oob[trialData.oct]++; // FIX 3: Update QA tracking
     } else {
       state.octaveStats.inBounds[trialData.oct]++;
+      state.qa.octaves.inBounds[trialData.oct]++; // FIX 3: Update QA tracking
     }
   }
   
