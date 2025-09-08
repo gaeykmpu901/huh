@@ -643,6 +643,10 @@ function adaptOOBTarget() {
     timestamp: Date.now()
   });
   
+  // Add debug logging as requested
+  const currentBlock = blockFromIndex(state.levelIndex);
+  console.log(`OOB_ADAPT block=${currentBlock} last60_acc=${observedAcc60}% new_target=${Math.round(newTarget * 100)}%`);
+  
   state.oobStats.targetRate = newTarget;
   save();
 }
@@ -1147,7 +1151,7 @@ const JITTER_LEVELS = {
     jitterRange: [-8, 8], // ±3-8¢
     probeRate: 0.08, // Raised to ~8% (bounded by global 10%)
     probeRange: [-30, 30], // ±25-40¢
-    anchorRate: 0.08, // 8% anchors (0¢)
+    anchorRate: 0.15, // 15% anchors (0¢) - ensures 2-3 per 20 trials
     promoteAcc: 0.75,
     promoteMedian: 20,
     trials: 40
@@ -1156,7 +1160,7 @@ const JITTER_LEVELS = {
     jitterRange: [-10, 10], // ±5-10¢
     probeRate: 0.09, // Raised to ~9%
     probeRange: [-35, 35],
-    anchorRate: 0.06, // 6% anchors (0¢)
+    anchorRate: 0.12, // 12% anchors (0¢) - ensures 2-3 per 20 trials
     promoteAcc: 0.80,
     promoteMedian: 15,
     trials: 40
@@ -1165,7 +1169,7 @@ const JITTER_LEVELS = {
     jitterRange: [-15, 15], // ±5-15¢
     probeRate: 0.10, // Raised to ~10%
     probeRange: [-40, 40],
-    anchorRate: 0.04, // 4% anchors (0¢)
+    anchorRate: 0.10, // 10% anchors (0¢) - ensures 2 per 20 trials
     promoteAcc: 0.90,
     promoteMedian: 10,
     promoteSD: 15,
@@ -1175,7 +1179,7 @@ const JITTER_LEVELS = {
     jitterRange: [-15, 15], // ±5-15¢ (global default)
     probeRate: 0.12, // Raised to ~12% (bounded by global ~10%)
     probeRange: [-40, 40],
-    anchorRate: 0.02, // 2% anchors (0¢)
+    anchorRate: 0.10, // 10% anchors (0¢) - ensures 2 per 20 trials
     demoteAcc: 0.75,
     demoteMedian: 25,
     demoteSD: 30,
@@ -2728,29 +2732,28 @@ async function nextTrial(forceNew=false){
       // Initialize jitter level for this note if needed
       initializeJitterLevel(truePc);
       
-      // Global probe rate limiting (~10%)
-      const globalProbeRate = 0.10;
-      const shouldProbe = Math.random() < globalProbeRate;
+      const level = state.jitterLevels[truePc];
+      const config = JITTER_LEVELS[level];
       
-      if (shouldProbe) {
-        // Check if this should be a boundary probe or 0¢ anchor
-        const level = state.jitterLevels[truePc];
-        const config = JITTER_LEVELS[level];
+      // Ensure 2-3 anchors per 20 trials (10-15% rate) - independent of probes
+      const anchorRate = config.anchorRate || 0.10; // Default 10% if not specified
+      const shouldAnchor = Math.random() < anchorRate;
+      
+      if (shouldAnchor) {
+        isAnchor = true;
+        appliedJitter = 0; // 0¢ anchor
+      } else {
+        // Global probe rate limiting (~10%)
+        const globalProbeRate = 0.10;
+        const shouldProbe = Math.random() < globalProbeRate;
         
-        // Decide between probe and anchor based on rates
-        const totalSpecialRate = config.probeRate + (config.anchorRate || 0);
-        const anchorProbability = (config.anchorRate || 0) / totalSpecialRate;
-        
-        if (Math.random() < anchorProbability) {
-          isAnchor = true;
-          appliedJitter = 0; // 0¢ anchor
-        } else {
+        if (shouldProbe) {
           isProbe = true;
           appliedJitter = calculateJitter(truePc, true); // Boundary probe
+        } else {
+          // Regular jitter
+          appliedJitter = calculateJitter(truePc, false);
         }
-      } else {
-        // Regular jitter
-        appliedJitter = calculateJitter(truePc, false);
       }
       
       // Store jitter info for this trial
