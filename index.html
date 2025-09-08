@@ -633,31 +633,29 @@ function shouldGenerateOOB(set) {
   return isOOB;
 }
 
-// Get current OOB target rate with 3-block cadence adaptation
+// Get current OOB target rate (adaptation happens at block boundaries only)
 function getAdaptiveOOBTarget() {
-  const currentBlock = blockFromIndex(state.levelIndex);
-  
   // Initialize adaptation tracking if needed
   if (!state.oobStats.adaptationCount) {
     state.oobStats.adaptationCount = 0;
   }
   
-  // Check if we need to adapt (every 3 blocks: 3, 6, 9, 12, ...)
-  if (currentBlock % 3 === 0) {
-    // Ensure we don't adapt the same block multiple times
-    if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== currentBlock) {
-      // In simulation mode, limit total adaptations to prevent spam
-      const maxAdaptations = typeof window.runSimWeek !== 'undefined' ? 7 : Infinity;
-      
-      if (state.oobStats.adaptationCount < maxAdaptations) {
-        adaptOOBTarget();
-        state.oobStats.adaptationCount++;
-        state.oobStats.lastAdaptedBlock = currentBlock;
-      }
-    }
-  }
-  
   return state.oobStats.adaptiveRate ?? 0.18;
+}
+
+// Check if adaptation should run at block end - only every 3 blocks
+function shouldAdaptAtBlockEnd(block) {
+  // Only adapt every 3 blocks (3, 6, 9, 12, ...)
+  if (block % 3 !== 0) return false;
+  
+  // Guard: Don't adapt the same block multiple times
+  if (state.oobStats.lastAdaptedBlock === block) return false;
+  
+  // In simulation mode, limit total adaptations to prevent spam
+  const maxAdaptations = typeof window.runSimWeek !== 'undefined' ? 7 : Infinity;
+  if (state.oobStats.adaptationCount >= maxAdaptations) return false;
+  
+  return true;
 }
 
 // Adapt OOB target every 3 blocks based on last 60 in-bounds trials
@@ -2581,7 +2579,9 @@ function updateOctaveMixing(trialData) {
   if (!state.qa.octaves) state.qa.octaves = {
     inBounds: { 3: 0, 4: 0, 5: 0 },
     oob: { 3: 0, 4: 0, 5: 0 },
-    mirrorCheck: []
+    mirrorCheck: [],
+    lastInBoundsWindow: { 3: 0, 4: 0, 5: 0 }, // For mirror check logic
+    inBoundsWindowTrials: [] // Rolling window of last completed in-bounds trials
   };
   
   // Track octave counts for QA export
@@ -2591,6 +2591,18 @@ function updateOctaveMixing(trialData) {
       state.qa.octaves.oob[octave]++;
     } else {
       state.qa.octaves.inBounds[octave]++;
+      
+      // Add to windowed tracking for mirror logic
+      state.qa.octaves.inBoundsWindowTrials.push({
+        octave: octave,
+        block: trialData.block,
+        timestamp: trialData.time
+      });
+      
+      // Keep only last 40 in-bounds trials for window
+      if (state.qa.octaves.inBoundsWindowTrials.length > 40) {
+        state.qa.octaves.inBoundsWindowTrials = state.qa.octaves.inBoundsWindowTrials.slice(-40);
+      }
     }
   }
   
@@ -2720,34 +2732,55 @@ function processEndOfSetPromotion() {
   };
 }
 
-// Add octave mirror check at block boundaries
+// Add octave mirror check at block boundaries using last completed in-bounds window
 function addOctaveMirrorCheck(blockIdx) {
   if (!state.qa?.octaves) return;
   
-  // Get current block's in-bounds and OOB octave distributions
-  const inBounds = state.qa.octaves.inBounds;
-  const oob = state.qa.octaves.oob;
+  // Calculate last completed in-bounds window distribution
+  const windowTrials = state.qa.octaves.inBoundsWindowTrials || [];
+  const lastInBoundsWindow = { 3: 0, 4: 0, 5: 0 };
   
-  // Calculate total counts
-  const totalInBounds = inBounds[3] + inBounds[4] + inBounds[5];
+  // Count octaves in the windowed trials
+  windowTrials.forEach(trial => {
+    if (trial.octave >= 3 && trial.octave <= 5) {
+      lastInBoundsWindow[trial.octave]++;
+    }
+  });
+  
+  // Store the last completed in-bounds window for OOB selector
+  state.qa.octaves.lastInBoundsWindow = { ...lastInBoundsWindow };
+  
+  const totalInBounds = lastInBoundsWindow[3] + lastInBoundsWindow[4] + lastInBoundsWindow[5];
+  const oob = state.qa.octaves.oob;
   const totalOOB = oob[3] + oob[4] + oob[5];
   
-  if (totalInBounds === 0 || totalOOB === 0) {
-    // Can't compare if either has no data
+  if (totalInBounds === 0) {
+    // Empty window - fallback to center-only, don't log as no_inbounds
     state.qa.octaves.mirrorCheck.push({
       blockIdx: blockIdx,
       mirrored: false,
-      reason: totalInBounds === 0 ? 'no_inbounds' : 'no_oob',
+      reason: 'empty_window_fallback',
       timestamp: Date.now()
     });
     return;
   }
   
-  // Calculate percentages
+  if (totalOOB === 0) {
+    // No OOB data to compare
+    state.qa.octaves.mirrorCheck.push({
+      blockIdx: blockIdx,
+      mirrored: false,
+      reason: 'no_oob',
+      timestamp: Date.now()
+    });
+    return;
+  }
+  
+  // Calculate percentages using windowed in-bounds data
   const inBoundsPct = {
-    3: inBounds[3] / totalInBounds,
-    4: inBounds[4] / totalInBounds,
-    5: inBounds[5] / totalInBounds
+    3: lastInBoundsWindow[3] / totalInBounds,
+    4: lastInBoundsWindow[4] / totalInBounds,
+    5: lastInBoundsWindow[5] / totalInBounds
   };
   
   const oobPct = {
@@ -2775,6 +2808,7 @@ function addOctaveMirrorCheck(blockIdx) {
       4: parseFloat(oobPct[4].toFixed(3)),
       5: parseFloat(oobPct[5].toFixed(3))
     },
+    windowSize: totalInBounds,
     timestamp: Date.now()
   });
   
@@ -3358,6 +3392,76 @@ function maybeSuggestRestart(){
   if(state.testFailStreak >= 10 && !suggestedRestartFlag){ suggestedRestartFlag = true; showSuggestBanner(); }
 }
 
+// Update running totals for detune types and per-pitch JL stats
+function updateDetuneShares(trialData) {
+  // Initialize detune shares tracking
+  if (!state.detune) state.detune = {};
+  if (!state.detune.shares) {
+    state.detune.shares = {
+      anchor: 0,
+      jitter: 0, 
+      probe: 0,
+      oob: 0
+    };
+  }
+  
+  // Update detune type counts
+  const detuneType = trialData.detuneMode;
+  if (detuneType && state.detune.shares.hasOwnProperty(detuneType)) {
+    state.detune.shares[detuneType]++;
+  }
+  
+  // Initialize per-pitch JL stats if needed
+  if (!state.jitter) state.jitter = {};
+  if (!state.jitter.perPitch) state.jitter.perPitch = {};
+  if (!state.jitter.levels) state.jitter.levels = {};
+  
+  // Update per-pitch stats for in-bounds trials
+  const pc = trialData.pc;
+  if (!trialData.oob && pc) {
+    // Persist current JL level in jitter.levels[pc]
+    state.jitter.levels[pc] = state.jitterLevels?.[pc] ?? 0;
+    
+    if (!state.jitter.perPitch[pc]) {
+      state.jitter.perPitch[pc] = {
+        JL: trialData.jlLevel || 0,
+        lastNTrials: [],
+        accuracy: 0,
+        medianCents: 0,
+        sdCents: 0
+      };
+    }
+    
+    // Update JL level from current state
+    state.jitter.perPitch[pc].JL = state.jitterLevels?.[pc] ?? 0;
+    
+    // Update rolling window (keep last 40 trials)
+    const centsError = Math.abs(trialData.cents || 0);
+    state.jitter.perPitch[pc].lastNTrials.push({
+      correct: trialData.correct,
+      centsError: centsError,
+      timestamp: trialData.time
+    });
+    
+    if (state.jitter.perPitch[pc].lastNTrials.length > 40) {
+      state.jitter.perPitch[pc].lastNTrials = state.jitter.perPitch[pc].lastNTrials.slice(-40);
+    }
+    
+    // Recalculate rolling stats
+    const trials = state.jitter.perPitch[pc].lastNTrials;
+    if (trials.length > 0) {
+      state.jitter.perPitch[pc].accuracy = trials.filter(t => t.correct).length / trials.length;
+      
+      const errors = trials.map(t => t.centsError).sort((a, b) => a - b);
+      state.jitter.perPitch[pc].medianCents = errors[Math.floor(errors.length / 2)] || 0;
+      
+      const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+      const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+      state.jitter.perPitch[pc].sdCents = Math.sqrt(variance);
+    }
+  }
+}
+
 function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   state.levelTrials++; if(ok) state.levelCorrect++;
   const block = blockFromIndex(state.levelIndex);
@@ -3374,6 +3478,7 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
                (!currentTrialJitter ? "anchor" :
                 currentTrialJitter.isAnchor ? "anchor" :
                 currentTrialJitter.isProbe ? "probe" : "jitter"),
+    jlLevel: !isOOBTrial && truePc ? (state.jitterLevels?.[truePc] ?? 0) : null, // JL level for this pitch
     isOOB: isOOBTrial,
     truePc: truePc,
     guessPc: oobChosen ? null : (guessLabel === 'TARGET' ? truePc : guessLabel),
@@ -3393,6 +3498,9 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   
   state.trials.push(trialData);
   
+  // Update detune type running totals
+  updateDetuneShares(trialData);
+  
   // Update note statistics for in-bounds trials
   if (!isOOBTrial && truePc) {
     const centsError = currentTrialJitter ? currentTrialJitter.jitter : 0;
@@ -3408,11 +3516,9 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
       updateConfusionMatrix(truePc, guessLabel);
     }
     
-    // Check for jitter level changes every few trials
-    if (state.levelTrials % 5 === 0) {
-      checkJitterPromotion(truePc);
-      checkJitterDemotion(truePc);
-    }
+    // Check for jitter level changes after each graded in-bounds trial
+    checkJitterPromotion(truePc);
+    checkJitterDemotion(truePc);
   }
   
   // Record OOB trial data for adaptive system
@@ -3427,6 +3533,13 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   // Track OOB time-series at block boundaries (every 40 trials)
   if (state.levelTrials % 40 === 0) {
     trackBlockEndOOBSeries(block);
+    
+    // Run adaptation at block end, only every 3 blocks with guards
+    if (shouldAdaptAtBlockEnd(block)) {
+      adaptOOBTarget();
+      state.oobStats.adaptationCount++;
+      state.oobStats.lastAdaptedBlock = block;
+    }
   }
   
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
@@ -5553,6 +5666,125 @@ window.QA.exportFull = function(cfg = {}) {
   };
 };
 
+/* ------------------ QA EXPORT FUNCTIONS ------------------ */
+// One-shot QA export function as requested
+window.qaExportFull = function(options = {}) {
+  const label = options.label || 'qa_export';
+  
+  // Get OOB series data with block indices
+  const oobSeries = (state.oobSeries || []).map(entry => ({
+    blockIndex: entry.blockIndex,
+    block: blockFromIndex(entry.blockIndex),
+    observedAcc60: entry.observedAcc60,
+    targetPct: entry.targetPct,
+    reason: entry.reason,
+    timestamp: entry.timestamp
+  }));
+  
+  // Get in-bounds octave tallies
+  const inBoundsOctaveTallies = {
+    cumulative: state.qa?.octaves?.inBounds || { 3: 0, 4: 0, 5: 0 },
+    lastWindow: state.qa?.octaves?.lastInBoundsWindow || { 3: 0, 4: 0, 5: 0 },
+    windowTrialsCount: state.qa?.octaves?.inBoundsWindowTrials?.length || 0
+  };
+  
+  // Get detune type counts and offsets
+  const detuneData = {
+    typeCounts: state.detune?.shares || { anchor: 0, jitter: 0, probe: 0, oob: 0 },
+    recentOffsets: state.trials.slice(-100).filter(t => t.cents !== null).map(t => ({
+      cents: t.cents,
+      detuneMode: t.detuneMode,
+      jlLevel: t.jlLevel,
+      block: t.block
+    }))
+  };
+  
+  // Get per-pitch JL data
+  const perPitchJL = {};
+  PC.forEach(pc => {
+    if (state.jitter?.perPitch?.[pc] || state.jitterLevels?.[pc] !== undefined) {
+      perPitchJL[pc] = {
+        currentJL: state.jitterLevels?.[pc] ?? 0,
+        persistedJL: state.jitter?.levels?.[pc] ?? 0,
+        accuracy: state.jitter?.perPitch?.[pc]?.accuracy ?? 0,
+        medianCents: state.jitter?.perPitch?.[pc]?.medianCents ?? 0,
+        sdCents: state.jitter?.perPitch?.[pc]?.sdCents ?? 0,
+        trialCount: state.jitter?.perPitch?.[pc]?.lastNTrials?.length ?? 0
+      };
+    }
+  });
+  
+  // Get rolling window stats used for JL and OOB decisions
+  const rollingWindowStats = {
+    jlPromotionRules: JITTER_PROMOTION_RULES,
+    jlDemotionRules: JITTER_DEMOTION_RULES,
+    oobAdaptationStats: {
+      currentRate: state.oobStats?.adaptiveRate ?? 0.18,
+      adaptationCount: state.oobStats?.adaptationCount ?? 0,
+      lastAdaptedBlock: state.oobStats?.lastAdaptedBlock,
+      recentTrialsCount: state.oobStats?.recentTrials?.length ?? 0
+    },
+    last60InBoundsTrials: state.trials
+      .filter(t => !t.oob && t.correct !== undefined)
+      .slice(-60).length
+  };
+  
+  // Get mirror check data
+  const mirrorChecks = state.qa?.octaves?.mirrorCheck || [];
+  
+  const exportData = {
+    label: label,
+    timestamp: Date.now(),
+    exportTime: new Date().toISOString(),
+    currentLevel: state.levelIndex,
+    currentSet: setFromIndex(state.levelIndex),
+    currentBlock: blockFromIndex(state.levelIndex),
+    
+    // OOB series with block indices
+    oobSeries: oobSeries,
+    
+    // In-bounds octave tallies
+    inBoundsOctaves: inBoundsOctaveTallies,
+    
+    // Detune type counts and offsets
+    detune: detuneData,
+    
+    // Per-pitch JL data
+    perPitchJL: perPitchJL,
+    
+    // Rolling window stats used for decisions
+    rollingWindowStats: rollingWindowStats,
+    
+    // Mirror check data (single check per block)
+    mirrorChecks: mirrorChecks.slice(-20), // Last 20 checks
+    
+    // Summary stats
+    summary: {
+      totalTrials: state.trials.length,
+      totalInBounds: state.trials.filter(t => !t.oob).length,
+      totalOOB: state.trials.filter(t => t.oob).length,
+      recentAccuracy: state.trials.slice(-60).filter(t => t.correct !== undefined).length > 0 
+        ? state.trials.slice(-60).filter(t => t.correct !== undefined && t.correct).length / 
+          state.trials.slice(-60).filter(t => t.correct !== undefined).length 
+        : 0
+    }
+  };
+  
+  // Log and return the data
+  console.log(`🎵 QA Export (${label}):`, exportData);
+  
+  // Also download as JSON file
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `huh_qa_export_${label}_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  
+  return exportData;
+};
+
 /* ------------------ INIT ------------------ */
 // Log dev functions availability for confirmation
 console.log('🎵 Dev functions available:');
@@ -5561,6 +5793,7 @@ console.log('- exportSimWeek:', typeof window.exportSimWeek === 'function' ? '�
 console.log('- exportDailyByPitch:', typeof window.exportDailyByPitch === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
 console.log('- debugJitter:', typeof window.debugJitter === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
 console.log('- QA.exportFull:', typeof window.QA?.exportFull === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
+console.log('- qaExportFull:', typeof window.qaExportFull === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
 
 window.addEventListener('load', wireOnce);
 window.addEventListener('resize', ()=>{ try{ drawChart(); }catch(_){ }});
