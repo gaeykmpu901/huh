@@ -4618,12 +4618,6 @@ window.exportSimWeek = async function(opts) {
   return results;
 };
 
-// Log dev functions availability for confirmation
-console.log('Dev functions available:');
-console.log('- runSimWeek:', typeof window.runSimWeek === 'function' ? 'available' : 'NOT AVAILABLE');
-console.log('- exportSimWeek:', typeof window.exportSimWeek === 'function' ? 'available' : 'NOT AVAILABLE');
-console.log('- exportDailyByPitch:', typeof window.exportDailyByPitch === 'function' ? 'available' : 'NOT AVAILABLE');
-
 // Add jitter debug commands
 window.debugJitter = function(pc = 'F') {
   console.log('=== JITTER DEBUG ===');
@@ -4918,6 +4912,13 @@ function generatePerPitchStats() {
 }
 
 /* ------------------ INIT ------------------ */
+// Log dev functions availability for confirmation
+console.log('🎵 Dev functions available:');
+console.log('- runSimWeek:', typeof window.runSimWeek === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
+console.log('- exportSimWeek:', typeof window.exportSimWeek === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
+console.log('- exportDailyByPitch:', typeof window.exportDailyByPitch === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
+console.log('- debugJitter:', typeof window.debugJitter === 'function' ? '✅ available' : '❌ NOT AVAILABLE');
+
 window.addEventListener('load', wireOnce);
 window.addEventListener('resize', ()=>{ try{ drawChart(); }catch(_){ }});
 </script>
