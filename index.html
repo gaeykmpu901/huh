@@ -593,14 +593,25 @@ function shouldGenerateOOB(set) {
 
 // Get current OOB target rate with 3-block cadence adaptation
 function getAdaptiveOOBTarget() {
-  const currentBlock = blockFromIndex(state.levelIndex);
+  const currentBlock = getCurrentBlock();
   
-  // Check if we need to adapt (every 3 blocks) - only once per block
-  if (currentBlock % 3 === 0 && currentBlock > 0) {
-    // Only adapt if we haven't adapted this block yet
+  // Initialize adaptation tracking if needed
+  if (!state.oobStats.adaptationCount) {
+    state.oobStats.adaptationCount = 0;
+  }
+  
+  // Check if we need to adapt (every 3 blocks) 
+  if (currentBlock % 3 === 1) {
+    // Ensure we don't adapt the same block multiple times
     if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== currentBlock) {
-      adaptOOBTarget();
-      state.oobStats.lastAdaptedBlock = currentBlock;
+      // In simulation mode, limit total adaptations to prevent spam
+      const maxAdaptations = typeof window.runSimWeek !== 'undefined' ? 7 : Infinity;
+      
+      if (state.oobStats.adaptationCount < maxAdaptations) {
+        adaptOOBTarget();
+        state.oobStats.adaptationCount++;
+        state.oobStats.lastAdaptedBlock = currentBlock;
+      }
     }
   }
   
@@ -648,7 +659,7 @@ function adaptOOBTarget() {
   });
   
   // Add debug logging as requested
-  const currentBlock = blockFromIndex(state.levelIndex);
+  const currentBlock = getCurrentBlock();
   console.log(`OOB_ADAPT block=${currentBlock} last60_acc=${observedAcc60}% new_target=${Math.round(newTarget * 100)}%`);
   
   state.oobStats.adaptiveRate = newTarget;
