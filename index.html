@@ -896,7 +896,10 @@ function checkJitterPromotion(pc) {
       acc: parseFloat(stats.accuracy.toFixed(3)),
       medianCents: parseFloat(stats.medianError.toFixed(1)),
       sdCents: parseFloat(stats.sdError.toFixed(1)),
-      windowN: stats.trials.length
+      windowN: stats.trials.length,
+      timestamp: Date.now(),
+      reason: 'promotion',
+      criteria: `acc=${parseFloat(stats.accuracy.toFixed(3))} >= ${rule.accuracy}, median=${parseFloat(stats.medianError.toFixed(1))} <= ${rule.medianCents}${rule.sdCents ? `, sd=${parseFloat(stats.sdError.toFixed(1))} <= ${rule.sdCents}` : ''}`
     };
     state.jitter.levelEvents.push(event);
     
@@ -953,7 +956,10 @@ function checkJitterDemotion(pc) {
       acc: parseFloat(recentAcc.toFixed(3)),
       medianCents: parseFloat(recentMedian.toFixed(1)),
       sdCents: parseFloat(recentSD.toFixed(1)),
-      windowN: recentTrials.length
+      windowN: recentTrials.length,
+      timestamp: Date.now(),
+      reason: 'demotion',
+      criteria: `acc=${parseFloat(recentAcc.toFixed(3))} < ${rules.accuracy} OR median=${parseFloat(recentMedian.toFixed(1))} > ${rules.medianCents} OR sd=${parseFloat(recentSD.toFixed(1))} > ${rules.sdCents}`
     };
     state.jitter.levelEvents.push(event);
     
@@ -2570,7 +2576,25 @@ function updateOctaveMixing(trialData) {
   const stats = state.octaveStats;
   stats.trialCount++;
   
-  // Only count graded in-bounds trials
+  // Initialize QA octave tracking
+  if (!state.qa) state.qa = {};
+  if (!state.qa.octaves) state.qa.octaves = {
+    inBounds: { 3: 0, 4: 0, 5: 0 },
+    oob: { 3: 0, 4: 0, 5: 0 },
+    mirrorCheck: []
+  };
+  
+  // Track octave counts for QA export
+  const octave = trialData.oct;
+  if (octave >= 3 && octave <= 5) {
+    if (trialData.oob) {
+      state.qa.octaves.oob[octave]++;
+    } else {
+      state.qa.octaves.inBounds[octave]++;
+    }
+  }
+  
+  // Only count graded in-bounds trials for the original octave mixing logic
   if (!trialData.oob && trialData.set) {
     stats.setTrials.push(trialData);
     
@@ -2586,6 +2610,9 @@ function updateOctaveMixing(trialData) {
     } else if (trialNum === 24) {
       checkOctaveStep(20, 24, 'window20_24');
       processEndOfSetPromotion();
+      
+      // Add mirror check at end of block
+      addOctaveMirrorCheck(trialData.block);
     }
   }
   
@@ -2691,6 +2718,70 @@ function processEndOfSetPromotion() {
     window16_20: null,
     window20_24: null
   };
+}
+
+// Add octave mirror check at block boundaries
+function addOctaveMirrorCheck(blockIdx) {
+  if (!state.qa?.octaves) return;
+  
+  // Get current block's in-bounds and OOB octave distributions
+  const inBounds = state.qa.octaves.inBounds;
+  const oob = state.qa.octaves.oob;
+  
+  // Calculate total counts
+  const totalInBounds = inBounds[3] + inBounds[4] + inBounds[5];
+  const totalOOB = oob[3] + oob[4] + oob[5];
+  
+  if (totalInBounds === 0 || totalOOB === 0) {
+    // Can't compare if either has no data
+    state.qa.octaves.mirrorCheck.push({
+      blockIdx: blockIdx,
+      mirrored: false,
+      reason: totalInBounds === 0 ? 'no_inbounds' : 'no_oob',
+      timestamp: Date.now()
+    });
+    return;
+  }
+  
+  // Calculate percentages
+  const inBoundsPct = {
+    3: inBounds[3] / totalInBounds,
+    4: inBounds[4] / totalInBounds,
+    5: inBounds[5] / totalInBounds
+  };
+  
+  const oobPct = {
+    3: oob[3] / totalOOB,
+    4: oob[4] / totalOOB,
+    5: oob[5] / totalOOB
+  };
+  
+  // Check if distributions are similar (within 15% for each octave)
+  const threshold = 0.15;
+  const mirrored = Math.abs(inBoundsPct[3] - oobPct[3]) <= threshold &&
+                   Math.abs(inBoundsPct[4] - oobPct[4]) <= threshold &&
+                   Math.abs(inBoundsPct[5] - oobPct[5]) <= threshold;
+  
+  state.qa.octaves.mirrorCheck.push({
+    blockIdx: blockIdx,
+    mirrored: mirrored,
+    inBoundsPct: {
+      3: parseFloat(inBoundsPct[3].toFixed(3)),
+      4: parseFloat(inBoundsPct[4].toFixed(3)),
+      5: parseFloat(inBoundsPct[5].toFixed(3))
+    },
+    oobPct: {
+      3: parseFloat(oobPct[3].toFixed(3)),
+      4: parseFloat(oobPct[4].toFixed(3)),
+      5: parseFloat(oobPct[5].toFixed(3))
+    },
+    timestamp: Date.now()
+  });
+  
+  // Keep only last 50 entries
+  if (state.qa.octaves.mirrorCheck.length > 50) {
+    state.qa.octaves.mirrorCheck = state.qa.octaves.mirrorCheck.slice(-50);
+  }
 }
 
 function currentOctaves(){ 
@@ -3332,6 +3423,11 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   
   // Validate OOB state
   validateOOBState();
+  
+  // Track OOB time-series at block boundaries (every 40 trials)
+  if (state.levelTrials % 40 === 0) {
+    trackBlockEndOOBSeries(block);
+  }
   
   save(); updateLevelUI(); try{ drawChart(); }catch(_){}; 
   if(block >= 21 && !ok) maybeSuggestRestart();
@@ -4272,6 +4368,62 @@ window.getOOBDebug = () => {
   return { rate: state.oobStats.adaptiveRate, maxInRow: state.oobStats.maxInRow, last60InBoundsAcc: acc };
 };
 
+// Track OOB time-series at block end for QA export
+function trackBlockEndOOBSeries(blockIdx) {
+  // Calculate current block's OOB percentage
+  const blockTrials = state.trials.slice(-40); // Last 40 trials (current block)
+  const blockOOBTrials = blockTrials.filter(t => t.oob);
+  const observedPct = blockTrials.length > 0 ? 
+    parseFloat((blockOOBTrials.length / blockTrials.length).toFixed(3)) : 0;
+  
+  // Calculate last 60 in-bounds accuracy
+  const last60InBounds = state.trials.filter(t => !t.oob).slice(-60);
+  const last60Acc = last60InBounds.length > 0 ? 
+    parseFloat((last60InBounds.filter(t => t.correct).length / last60InBounds.length).toFixed(3)) : 0;
+  
+  // Get current target percentage
+  const targetPct = parseFloat((state.oobStats?.adaptiveRate || 0.18).toFixed(3));
+  
+  // Initialize QA structures if needed
+  if (!state.qa) state.qa = {};
+  if (!state.qa.oob) state.qa.oob = {};
+  if (!state.qa.oob.series) state.qa.oob.series = [];
+  if (!state.qa.curriculum) state.qa.curriculum = {
+    activePitches: [],
+    weights: {},
+    blockBoundaries: []
+  };
+  
+  // Add block end entry for OOB series
+  state.qa.oob.series.push({
+    blockIdx: blockIdx,
+    targetPct: targetPct,
+    observedPct: observedPct,
+    last60Acc: last60Acc,
+    timestamp: Date.now()
+  });
+  
+  // Track curriculum state at block boundary
+  const currentSet = setFromIndex(state.levelIndex);
+  const activePitches = trainedSet(currentSet);
+  
+  state.qa.curriculum.blockBoundaries.push({
+    blockIdx: blockIdx,
+    activePitches: [...activePitches].sort(),
+    weights: { ...state.curriculum.weights },
+    set: currentSet,
+    timestamp: Date.now()
+  });
+  
+  // Keep only last 100 entries to avoid memory bloat
+  if (state.qa.oob.series.length > 100) {
+    state.qa.oob.series = state.qa.oob.series.slice(-100);
+  }
+  if (state.qa.curriculum.blockBoundaries.length > 100) {
+    state.qa.curriculum.blockBoundaries = state.qa.curriculum.blockBoundaries.slice(-100);
+  }
+}
+
 /* ------------------ OFFLINE SIMULATOR ------------------ */
 
 // Seeded RNG (mulberry32) for reproducible simulations
@@ -4318,8 +4470,12 @@ function initializeSimConfusionMatrix() {
 // Learner model response
 function simulateLearnerResponse(truePc, isOOB, jitterInfo) {
   if (isOOB) {
-    // OOB trials are always incorrect, no skill update
-    return { correct: false, guess: 'OOB' };
+    // OOB trials: simulate realistic detection ability
+    // Base OOB detection rate of 70%, with some variation based on skill level
+    const avgSkill = Object.values(learnerSkills).reduce((a, b) => a + b, 0) / 12;
+    const detectionRate = 0.65 + (avgSkill - 0.55) * 0.2; // Range: ~0.65-0.75
+    const correctOOB = simRNG() < Math.max(0.5, Math.min(0.85, detectionRate));
+    return { correct: correctOOB, guess: 'OOB' };
   }
   
   // Calculate base probability of correct response
@@ -5248,33 +5404,22 @@ window.QA = window.QA || {};
 
 // EXPORT API (for QA/tools) - Implement QA.exportFull as specified
 window.QA.exportFull = function(cfg = {}) {
-  // Calculate detune shares
-  const recentTrials = state.trials.slice(-1000).filter(t => !t.oob);
-  const anchorsCount = recentTrials.filter(t => t.detuneMode === 'anchor').length;
-  const probesCount = recentTrials.filter(t => t.detuneMode === 'probe').length;
-  const jitterCount = recentTrials.filter(t => t.detuneMode === 'jitter').length;
+  // GUARD: Use last N=40 graded in-bounds for thresholds, exclude OOB
+  const last40InBounds = state.trials.filter(t => !t.oob).slice(-40);
+  
+  // Calculate detune shares from tone log (all in-bounds tones)
+  const inBoundsTrials = state.trials.filter(t => !t.oob);
+  const anchorsCount = inBoundsTrials.filter(t => t.detuneMode === 'anchor').length;
+  const probesCount = inBoundsTrials.filter(t => t.detuneMode === 'probe').length;
+  const jitterCount = inBoundsTrials.filter(t => t.detuneMode === 'jitter').length;
   const totalDetune = anchorsCount + probesCount + jitterCount;
   
   const detuneShares = {
     anchorsPct: totalDetune > 0 ? parseFloat((anchorsCount / totalDetune).toFixed(3)) : 0,
     probesPct: totalDetune > 0 ? parseFloat((probesCount / totalDetune).toFixed(3)) : 0,
     jitterPct: totalDetune > 0 ? parseFloat((jitterCount / totalDetune).toFixed(3)) : 0,
-    counts: { anchors: anchorsCount, probes: probesCount, jitter: jitterCount }
+    counts: { anchors: anchorsCount, probes: probesCount, jitter: jitterCount, total: totalDetune }
   };
-  
-  // Calculate octave distributions
-  const inBoundsOctaves = { 3: 0, 4: 0, 5: 0 };
-  const oobOctaves = { 3: 0, 4: 0, 5: 0 };
-  
-  state.trials.slice(-1000).forEach(trial => {
-    if (trial.oct >= 3 && trial.oct <= 5) {
-      if (trial.oob) {
-        oobOctaves[trial.oct]++;
-      } else {
-        inBoundsOctaves[trial.oct]++;
-      }
-    }
-  });
   
   // Calculate OOB metrics
   const oobTrials = state.trials.filter(t => t.oob);
@@ -5294,29 +5439,31 @@ window.QA.exportFull = function(cfg = {}) {
     }
   });
   
-  // Calculate last 60 in-bounds accuracy
+  // Calculate last 60 in-bounds accuracy (for legacy compatibility)
   const last60InBounds = state.trials.filter(t => !t.oob).slice(-60);
   const last60Acc = last60InBounds.length > 0 ? 
     parseFloat((last60InBounds.filter(t => t.correct).length / last60InBounds.length).toFixed(3)) : 0;
   
-  // Convert legacy oobSeries if needed
-  const convertedOobSeries = (state.oobSeries || []).map(entry => {
-    const converted = { ...entry };
-    // If old entry has value > 1, convert from percentage to fraction
-    if (converted.newTarget && converted.newTarget > 1) {
-      converted.targetPct = converted.newTarget / 100;
-      delete converted.newTarget;
-    } else if (converted.targetPct === undefined && converted.newTarget !== undefined) {
-      converted.targetPct = converted.newTarget;
-    }
-    return converted;
-  });
-  
-  // Generate per-pitch detune array
-  const byPitchDetuneArray = PC.map(pc => {
+  // Generate per-pitch jitter levels using GUARDED last 40 in-bounds
+  const byPitchJitterLevels = PC.map(pc => {
     const level = state.jitterLevels[pc] || 0;
     const config = JITTER_LEVELS[level];
-    const stats = state.noteStats[pc] || { trials: [], accuracy: 0, medianError: 0, sdError: 0 };
+    
+    // Use last 40 graded in-bounds for this pitch only  
+    const pitchTrials = last40InBounds.filter(t => t.pc === pc);
+    let stats = { trials: [], accuracy: 0, medianError: 0, sdError: 0 };
+    
+    if (pitchTrials.length > 0) {
+      const accuracy = pitchTrials.filter(t => t.correct).length / pitchTrials.length;
+      const errors = pitchTrials.map(t => Math.abs(t.cents || 0));
+      errors.sort((a, b) => a - b);
+      const medianError = errors.length > 0 ? errors[Math.floor(errors.length / 2)] : 0;
+      const mean = errors.reduce((a, b) => a + b, 0) / errors.length;
+      const variance = errors.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / errors.length;
+      const sdError = Math.sqrt(variance);
+      
+      stats = { accuracy, medianError, sdError, trials: pitchTrials };
+    }
     
     return {
       pc: pc,
@@ -5327,13 +5474,18 @@ window.QA.exportFull = function(cfg = {}) {
       jitterRange: `±${config.jitterRange[0]}-${config.jitterRange[1]}¢`,
       acc: stats.trials.length > 0 ? parseFloat(stats.accuracy.toFixed(3)) : null,
       medianCents: stats.trials.length > 0 ? parseFloat(stats.medianError.toFixed(1)) : null,
-      sdCents: stats.trials.length > 0 ? parseFloat(stats.sdError.toFixed(1)) : null
+      sdCents: stats.trials.length > 0 ? parseFloat(stats.sdError.toFixed(1)) : null,
+      windowN: stats.trials.length // Number of trials in last 40 window for this pitch
     };
   });
   
   // Calculate days since start
   const days = state.startDate ? 
     Math.floor((Date.now() - state.startDate) / (24 * 60 * 60 * 1000)) + 1 : 1;
+  
+  // Get current curriculum state
+  const currentSet = setFromIndex(state.levelIndex);
+  const activePitches = trainedSet(currentSet);
   
   return {
     sim: { 
@@ -5342,29 +5494,38 @@ window.QA.exportFull = function(cfg = {}) {
     },
     counts: { 
       tones: state.trials.length, 
-      trials: state.trials.length 
+      trials: state.trials.length,
+      last40InBounds: last40InBounds.length
     },
     oob: { 
-      series: convertedOobSeries, 
+      // Enhanced OOB time-series from qa.oob.series
+      series: state.qa?.oob?.series || [], 
       observedPct: observedPct, 
       maxStreak: maxStreak, 
       last60Acc: last60Acc 
     },
     octaves: { 
-      inBounds: inBoundsOctaves, 
-      oob: oobOctaves, 
-      mirrorCheck: state.oobOctaveMirror || [] 
+      // Enhanced octave tracking from qa.octaves
+      inBounds: state.qa?.octaves?.inBounds || { 3: 0, 4: 0, 5: 0 }, 
+      oob: state.qa?.octaves?.oob || { 3: 0, 4: 0, 5: 0 }, 
+      mirrorCheck: state.qa?.octaves?.mirrorCheck || []
     },
     detune: { 
-      shares: detuneShares, 
-      perPitch: byPitchDetuneArray 
+      shares: detuneShares
     },
     jitter: { 
+      // Current JL per pitch and level events with timestamps/reasons
       levels: state.jitterLevels || {}, 
-      byPitch: state.jitter?.byPitch || {}, 
+      perPitch: byPitchJitterLevels,
       levelEvents: state.jitter?.levelEvents || [] 
     },
-    curriculum: state.curriculum || { active: [], weights: {}, events: [] },
+    curriculum: {
+      // Current active pitch classes and selection weights at block boundaries
+      active: [...activePitches].sort(),
+      weights: state.curriculum?.weights || {},
+      events: state.curriculum?.events || [],
+      blockBoundaries: state.qa?.curriculum?.blockBoundaries || []
+    },
     recall: state.recall || {},
     tails: { 
       tones: state.trials.slice(-400).map(t => ({
