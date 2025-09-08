@@ -702,7 +702,7 @@ function adaptOOBTarget() {
   if (!state.qa.oob.series) state.qa.oob.series = [];
   
   const oobRecord = {
-    globalTimeBlockIndex: state.globalTimeBlockIndex,
+    globalTimeBlockIndex: state.counters.globalTimeBlockIndex,
     targetPct: parseFloat(newTarget.toFixed(3)), // Store as fraction 0..1
     last60Acc: last60Acc, // Store as fraction 0..1
     observedPctThisBlock: observedPctThisBlock // Fraction 0..1
@@ -717,7 +717,7 @@ function adaptOOBTarget() {
   
   // Add debug logging
   const currentBlock = blockFromIndex(state.levelIndex);
-  console.log(`OOB_ADAPT globalTimeBlock=${state.globalTimeBlockIndex} last60_acc=${Math.round(last60Acc*100)}% new_target=${Math.round(newTarget * 100)}%`);
+  console.log(`OOB_ADAPT globalTimeBlock=${state.counters.globalTimeBlockIndex} last60_acc=${Math.round(last60Acc*100)}% new_target=${Math.round(newTarget * 100)}%`);
   
   save();
 }
@@ -3698,14 +3698,18 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   if(block >= 21){ if(ok){ state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; } else { state.testFailStreak=(state.testFailStreak||0)+1; } }
   else { state.testFailStreak=0; hideSuggestBanner(); suggestedRestartFlag=false; }
   
-  // Update unified tracking counters per glossary
-  state.trialIndex++; // Increment for all trials
+  // Update centralized counters as specified in problem statement
+  state.counters.trialIndex++; // Increment for all trials
   const isGradedInBounds = !isOOBTrial && !timeout; // Only graded in-bounds trials count
   if (isGradedInBounds) {
-    state.inbTrialIndex++;
-    // Update Q-Block index: floor(inbTrialIndex/20)+1
-    state.qBlockIndex = Math.floor(state.inbTrialIndex / 20) + 1;
+    state.counters.inbTrialIndex++;
+    state.counters.qBlockIndex = Math.floor(state.counters.inbTrialIndex / 20) + 1;
   }
+  
+  // Update backward compatibility counters
+  state.trialIndex = state.counters.trialIndex;
+  state.inbTrialIndex = state.counters.inbTrialIndex;
+  state.qBlockIndex = state.counters.qBlockIndex;
   
   // B) BOUNDARY PROBE RATE - Enhanced trial data with required fields
   const trialData = {
@@ -3736,13 +3740,6 @@ function recordTrial(guessLabel, ok, timeout=false, oobChosen=false){
   };
   
   state.trials.push(trialData);
-  
-  // Update centralized counters as specified in problem statement
-  state.counters.trialIndex++;
-  if (!isOOBTrial && ok !== undefined) {
-    state.counters.inbTrialIndex++;
-    state.counters.qBlockIndex = Math.floor(state.counters.inbTrialIndex / 20) + 1;
-  }
   
   // Store detune information for in-bounds trials as specified
   if (!isOOBTrial && currentTrialJitter) {
@@ -3917,22 +3914,26 @@ function beginTimeBlock() {
 }
 
 function endTimeBlock() {
-  // Update time-block counters per glossary
+  // Update time-block counters per glossary using centralized counters
   state.minutesToday += BLOCK_LEN_MIN;
-  state.globalTimeBlockIndex++;
-  state.timeBlockIndex = ((state.minutesToday - BLOCK_LEN_MIN) % 30) / 6 + 1; // 1-5 within day
+  state.counters.globalTimeBlockIndex++;
+  state.counters.timeBlockIndex = Math.min(5, Math.floor(((state.minutesToday - BLOCK_LEN_MIN) % 30) / 6) + 1); // 1-5 within day
+  
+  // Update backward compatibility fields
+  state.globalTimeBlockIndex = state.counters.globalTimeBlockIndex;
+  state.timeBlockIndex = state.counters.timeBlockIndex;
   
   // Compute OOB octave mirroring at Time-Block START from last completed in-bounds window
   computeOOBOctaveMirroring();
   
   // adaptOOBTarget() ONLY in endTimeBlock(), and only when specified conditions met
-  const shouldAdapt = (state.globalTimeBlockIndex % 3 === 0) || 
-                      (state.inbTrialIndex - state.lastOOBAdaptAt.inbTrialIndex >= 60);
+  const shouldAdapt = (state.counters.globalTimeBlockIndex % 3 === 0) || 
+                      (state.counters.inbTrialIndex - state.counters.lastOOBAdaptAt.inbTrialIndex >= 60);
   
   if (shouldAdapt) {
     adaptOOBTarget();
-    state.lastOOBAdaptAt.inbTrialIndex = state.inbTrialIndex;
-    state.lastOOBAdaptAt.globalTimeBlockIndex = state.globalTimeBlockIndex;
+    state.counters.lastOOBAdaptAt.inbTrialIndex = state.counters.inbTrialIndex;
+    state.counters.lastOOBAdaptAt.globalTimeBlockIndex = state.counters.globalTimeBlockIndex;
   }
   
   // Reset OOB streak at block boundary
@@ -5491,15 +5492,15 @@ window.runSimWeek = function(opts = {}) {
           state.oobOctaveMirror.push(mirrorRecord);
         }
         
-        // Trigger block boundary logic every 3 blocks
-        if (block % 3 === 0) {
-          // Trigger actual OOB adaptation logic during simulation
-          const globalBlock = (day - 1) * dailyBlocks + block;
-          const oldRate = state.oobStats?.adaptiveRate ?? 0.18;
+        // Trigger block boundary logic when globalBlock % 3 === 0 (not local block)
+        const globalBlock = (day - 1) * dailyBlocks + block;
+        
+        if (globalBlock % 3 === 0) {
+          // Update counters to simulate proper time block progression
           
-          // Temporarily set levelIndex for adaptation function
-          const originalLevelIndex = state.levelIndex;
-          state.levelIndex = globalBlock;
+          // Update the centralized counters to reflect the current state
+          state.counters.globalTimeBlockIndex = globalBlock;
+          state.counters.inbTrialIndex = out.trials.filter(t => !t.oob && t.correct !== undefined).length;
           
           // Calculate last 60 in-bounds accuracy before adaptation
           const last60InBounds = out.trials
@@ -5509,16 +5510,18 @@ window.runSimWeek = function(opts = {}) {
           const last60Acc = last60InBounds.length > 0 ? 
             last60InBounds.filter(t => t.correct).length / last60InBounds.length : 0;
           
-          // Call the real adaptation function
+          // Call the real adaptation function with proper condition checking
           withSimulatedRandom(() => {
-            if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== globalBlock) {
+            // Check the proper conditions as in endTimeBlock()
+            const shouldAdapt = (state.counters.globalTimeBlockIndex % 3 === 0) || 
+                                (state.counters.inbTrialIndex - state.counters.lastOOBAdaptAt.inbTrialIndex >= 60);
+            
+            if (shouldAdapt) {
               adaptOOBTarget();
-              state.oobStats.lastAdaptedBlock = globalBlock;
+              state.counters.lastOOBAdaptAt.inbTrialIndex = state.counters.inbTrialIndex;
+              state.counters.lastOOBAdaptAt.globalTimeBlockIndex = state.counters.globalTimeBlockIndex;
             }
           });
-          
-          // Restore original levelIndex
-          state.levelIndex = originalLevelIndex;
           
           const newRate = state.oobStats?.adaptiveRate ?? 0.18;
           
@@ -5592,6 +5595,25 @@ window.runSimWeek = function(opts = {}) {
         tone.cents = 0;
       }
     });
+    
+    // Calculate total octave counts across all days for export
+    const totalOctaveCounts = {
+      inBounds: { 3: 0, 4: 0, 5: 0 },
+      oob: { 3: 0, 4: 0, 5: 0 }
+    };
+    
+    out.trials.forEach(trial => {
+      const octave = trial.truePc ? parseInt(trial.trueNote?.slice(-1)) : null;
+      if (octave >= 3 && octave <= 5) {
+        if (trial.oob) {
+          totalOctaveCounts.oob[octave]++;
+        } else {
+          totalOctaveCounts.inBounds[octave]++;
+        }
+      }
+    });
+    
+    out.octaveCounts = totalOctaveCounts;
     
     // Return the required structure
     return out;
@@ -5975,8 +5997,8 @@ window.QA.exportFull = function(opts = {}) {
       last60Acc: last60Acc 
     },
     octaves: { 
-      inBounds: state.octaveStats?.inBounds || { 3: 0, 4: 0, 5: 0 }, 
-      oob: state.octaveStats?.oob || { 3: 0, 4: 0, 5: 0 }, 
+      inBounds: simData ? (simData.octaveCounts?.inBounds || { 3: 0, 4: 0, 5: 0 }) : (state.octaveStats?.inBounds || { 3: 0, 4: 0, 5: 0 }), 
+      oob: simData ? (simData.octaveCounts?.oob || { 3: 0, 4: 0, 5: 0 }) : (state.octaveStats?.oob || { 3: 0, 4: 0, 5: 0 }), 
       mirror: state.qa.octaves.mirror || []
     },
     detune: { 
