@@ -688,7 +688,7 @@ function adaptOOBTarget() {
   // Clamp to 5-35% range
   newTarget = Math.max(0.05, Math.min(0.35, newTarget));
   
-  // Calculate observed OOB percentage in current time block (for observedPctThisBlock)
+  // Calculate observed OOB percentage in current time block (for legacy tracking)
   const currentBlockTrials = state.trials.filter(t => {
     // Approximate current block trials (this could be refined with better time tracking)
     return t.time && t.time > (Date.now() - BLOCK_LEN_MIN * 60 * 1000);
@@ -697,19 +697,18 @@ function adaptOOBTarget() {
   const observedPctThisBlock = currentBlockTrials.length > 0 ? 
     num(currentBlockOOB.length / currentBlockTrials.length, 0) : 0;
   
-  // Record the adaptation in oobSeries per problem statement format
+  // NOTE: OOB series recording moved to endTimeBlock() to ensure exactly 1 row per block
+  // Keep legacy oobSeries for backward compatibility
   if (!state.oobSeries) state.oobSeries = [];
-  if (!state.qa.oob.series) state.qa.oob.series = [];
   
-  const oobRecord = {
+  const legacyRecord = {
     globalTimeBlockIndex: state.counters.globalTimeBlockIndex,
     targetPct: num(newTarget, 0.18), // Store as fraction 0..1, safely normalized
     last60Acc: last60Acc, // Store as fraction 0..1
     observedPctThisBlock: observedPctThisBlock // Fraction 0..1
   };
   
-  state.oobSeries.push(oobRecord);
-  state.qa.oob.series.push(oobRecord);
+  state.oobSeries.push(legacyRecord);
   
   // Freeze the new target for the next Time-Block
   state.oobStats.adaptiveRate = newTarget;
@@ -1248,10 +1247,7 @@ try{
 }
 
 // Initialize QA arrays for recording as specified in problem statement
-window.qa = window.qa || {};
-qa.tones = qa.tones || [];
-qa.trials = qa.trials || [];
-qa.oobSeries = qa.oobSeries || [];
+// REMOVED: Global qa object - now using state.qa consistently
 
 // Migration for audioType
 if (!state.audioType) {
@@ -1364,6 +1360,10 @@ state.qa ??= {};
 state.qa.oob ??= {};
 state.qa.oob.series ??= []; // Will store time block adaptation records
 
+// Initialize QA recording arrays as specified in problem statement
+state.qa.tones ??= []; // All tone presentations
+state.qa.trials ??= []; // All trial results
+
 state.qa.octaves ??= {};
 state.qa.octaves.inBounds ??= { 3: 0, 4: 0, 5: 0 };
 state.qa.octaves.oob ??= { 3: 0, 4: 0, 5: 0 };
@@ -1388,6 +1388,13 @@ state.qa.curriculum.active ??= [];
 state.qa.curriculum.weights ??= {};
 state.qa.curriculum.events ??= [];
 
+// E) CURRICULUM GUARD - Add settings structure with disabled flag
+if (!state.settings) state.settings = {};
+if (!state.settings.curriculum) state.settings.curriculum = {};
+if (typeof state.settings.curriculum.enabled !== 'boolean') {
+  state.settings.curriculum.enabled = false; // Default to disabled
+}
+
 // Initialize octave snapshot for OOB generation
 state.octaveSnapshotForOOB ??= { inBoundsMix: {3: 0, 4: 1, 5: 0}, available: ["3", "4", "5"] };
 
@@ -1398,6 +1405,18 @@ save();
 
 /* ------------------ CURRICULUM TRACKING ------------------ */
 function updateCurriculumTracking() {
+  // E) CURRICULUM GUARD - Only track if curriculum is enabled
+  if (!state.settings?.curriculum?.enabled) {
+    // When disabled, maintain a small active set and no events
+    const currentSet = setFromIndex(state.levelIndex);
+    const minimalActive = ["F"]; // Small set as specified when disabled
+    
+    state.qa.curriculum.active = [...minimalActive];
+    state.qa.curriculum.weights = { F: 1.0 };
+    // Do not add events when disabled
+    return;
+  }
+  
   // Update active pitch classes based on current level
   const currentSet = setFromIndex(state.levelIndex);
   const activePitches = trainedSet(currentSet);
@@ -3488,13 +3507,13 @@ function guess(pc){
     const rtMs = Math.round(performance.now() - (trialStartTime || performance.now()));
     
     // Record to QA arrays as specified in problem statement
-    qa.trials.push({
+    state.qa.trials.push({
       trueNote: currentNote,
       truePc: truePc,
       guess: ok ? currentNote : `${pc}${currentNote ? currentNote.slice(-1) : '4'}`,
       guessPc: pc,
       correct: ok,
-      oob: false,
+      oob: isOOBTrial, // Fix: use isOOBTrial exactly as specified
       rtMs: rtMs
     });
     
@@ -3522,13 +3541,13 @@ function chooseOOB(){
     const rtMs = Math.round(performance.now() - (trialStartTime || performance.now()));
     
     // Record to QA arrays as specified in problem statement
-    qa.trials.push({
+    state.qa.trials.push({
       trueNote: currentNote,
       truePc: truePc,
       guess: null,
       guessPc: null,
       correct: ok,
-      oob: true,
+      oob: isOOBTrial, // Fix: use isOOBTrial exactly as specified
       rtMs: rtMs
     });
     
@@ -3612,7 +3631,7 @@ async function nextTrial(forceNew=false){
     state.tones.push(toneRecord);
     
     // Also record to QA array as specified in problem statement
-    qa.tones.push(toneRecord);
+    state.qa.tones.push(toneRecord);
     
     // Set up input gating and enable buttons as specified
     state.awaitingInput = true;
@@ -3640,13 +3659,13 @@ function handleTimeout(){
   enableGuessButtons("off");
   
   // Record timeout trial to QA arrays
-  qa.trials.push({
+  state.qa.trials.push({
     trueNote: currentNote,
     truePc: truePc,
     guess: null,
     guessPc: null,
     correct: false,
-    oob: !!isOOBTrial,
+    oob: isOOBTrial, // Fix: use isOOBTrial exactly as specified
     rtMs: null
   });
   
@@ -4057,6 +4076,9 @@ function endTimeBlock() {
   // Compute OOB octave mirroring at Time-Block START from last completed in-bounds window
   computeOOBOctaveMirroring();
   
+  // B) OOB SERIES - Record ONE row per completed TimeBlock as specified
+  recordOOBSeriesForBlock();
+  
   // adaptOOBTarget() ONLY in endTimeBlock(), and only when specified conditions met
   const shouldAdapt = (state.counters.globalTimeBlockIndex % 3 === 0) || 
                       (state.counters.inbTrialIndex - state.counters.lastOOBAdaptAt.inbTrialIndex >= 60);
@@ -4079,6 +4101,45 @@ function endTimeBlock() {
   }
   
   save();
+}
+
+function recordOOBSeriesForBlock() {
+  // B) Record exactly ONE row per completed TimeBlock as specified in problem statement
+  
+  // Calculate current targetPct (doesn't change within a TimeBlock)
+  const targetPct = num(state.oobStats?.adaptiveRate ?? 0.18, 0.18);
+  
+  // Calculate last 60 in-bounds accuracy
+  const last60InBounds = state.trials
+    .filter(t => !t.oob && t.correct !== undefined)
+    .slice(-60);
+  const last60Acc = last60InBounds.length > 0 ? 
+    num(last60InBounds.filter(t => t.correct).length / last60InBounds.length, 0) : 0;
+  
+  // Calculate observed OOB percentage for this block
+  const currentBlockTrials = state.trials.filter(t => {
+    return t.time && t.time > (Date.now() - BLOCK_LEN_MIN * 60 * 1000);
+  });
+  const currentBlockOOB = currentBlockTrials.filter(t => t.oob);
+  const observedPctThisBlock = currentBlockTrials.length > 0 ? 
+    num(currentBlockOOB.length / currentBlockTrials.length, 0) : 0;
+  
+  // Create the OOB series record as specified
+  const oobRecord = {
+    globalTimeBlockIndex: state.counters.globalTimeBlockIndex,
+    targetPct: targetPct,
+    last60Acc: last60Acc,
+    observedPctThisBlock: observedPctThisBlock
+  };
+  
+  // Push to qa.oob.series
+  if (!state.qa.oob.series) state.qa.oob.series = [];
+  state.qa.oob.series.push(oobRecord);
+  
+  // Keep last 100 entries to prevent unbounded growth
+  if (state.qa.oob.series.length > 100) {
+    state.qa.oob.series = state.qa.oob.series.slice(-100);
+  }
 }
 
 function computeOOBOctaveMirroring() {
@@ -6115,11 +6176,11 @@ window.QA.exportFull = function(opts = {}) {
     trialsData = simData.trials || [];
     tonesData = simData.tones || [];
   } else {
-    // Use live state data
-    totalTrials = state.trials.length;
-    totalTones = state.tones?.length || 0; // FIX 1: Use real tones array
-    trialsData = state.trials;
-    tonesData = state.tones || [];
+    // Use QA recording arrays as specified in problem statement
+    totalTrials = state.qa.trials?.length || 0;
+    totalTones = state.qa.tones?.length || 0;
+    trialsData = state.qa.trials || [];
+    tonesData = state.qa.tones || [];
   }
   
   // Calculate OOB metrics
