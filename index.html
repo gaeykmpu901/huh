@@ -593,14 +593,29 @@ function shouldGenerateOOB(set) {
 
 // Get current OOB target rate with 3-block cadence adaptation
 function getAdaptiveOOBTarget() {
-  const currentBlock = blockFromIndex(state.levelIndex);
+  const currentBlock = getCurrentBlock();
   
-  // Check if we need to adapt (every 3 blocks)
-  if (currentBlock % 3 === 1) {
-    adaptOOBTarget();
+  // Initialize adaptation tracking if needed
+  if (!state.oobStats.adaptationCount) {
+    state.oobStats.adaptationCount = 0;
   }
   
-  return state.oobStats.targetRate ?? 0.18;
+  // Check if we need to adapt (every 3 blocks) 
+  if (currentBlock % 3 === 1) {
+    // Ensure we don't adapt the same block multiple times
+    if (!state.oobStats.lastAdaptedBlock || state.oobStats.lastAdaptedBlock !== currentBlock) {
+      // In simulation mode, limit total adaptations to prevent spam
+      const maxAdaptations = typeof window.runSimWeek !== 'undefined' ? 7 : Infinity;
+      
+      if (state.oobStats.adaptationCount < maxAdaptations) {
+        adaptOOBTarget();
+        state.oobStats.adaptationCount++;
+        state.oobStats.lastAdaptedBlock = currentBlock;
+      }
+    }
+  }
+  
+  return state.oobStats.adaptiveRate ?? 0.18;
 }
 
 // Adapt OOB target every 3 blocks based on last 60 in-bounds trials
@@ -618,7 +633,7 @@ function adaptOOBTarget() {
   const observedAcc = last60InBounds.filter(t => t.correct).length / last60InBounds.length;
   const observedAcc60 = Math.round(observedAcc * 100);
   
-  let newTarget = state.oobStats.targetRate ?? 0.18;
+  let newTarget = state.oobStats.adaptiveRate ?? 0.18;
   let reason = 'no-change';
   
   // Target policy: nudge toward 70-85% overall accuracy using ±3pp steps
@@ -643,7 +658,11 @@ function adaptOOBTarget() {
     timestamp: Date.now()
   });
   
-  state.oobStats.targetRate = newTarget;
+  // Add debug logging as requested
+  const currentBlock = getCurrentBlock();
+  console.log(`OOB_ADAPT block=${currentBlock} last60_acc=${observedAcc60}% new_target=${Math.round(newTarget * 100)}%`);
+  
+  state.oobStats.adaptiveRate = newTarget;
   save();
 }
 
@@ -860,7 +879,7 @@ state.oobStats ??= {};
 state.oobStats.oobTrials ??= [];
 state.oobStats.recentTrials ??= [];   // in-bounds only, 1/0
 state.oobStats.streakCount ??= 0;     // generation streak
-if (typeof state.oobStats.targetRate !== 'number') state.oobStats.targetRate = 0.18; // 18%
+if (typeof state.oobStats.adaptiveRate !== 'number') state.oobStats.adaptiveRate = 0.18; // 18%
 state.oobStats.maxInRow = 2;          // streak cap
 state.oobSeries ??= [];               // OOB adaptation log
 save();
@@ -1147,7 +1166,7 @@ const JITTER_LEVELS = {
     jitterRange: [-8, 8], // ±3-8¢
     probeRate: 0.08, // Raised to ~8% (bounded by global 10%)
     probeRange: [-30, 30], // ±25-40¢
-    anchorRate: 0.08, // 8% anchors (0¢)
+    anchorRate: 0.15, // 15% anchors (0¢) - ensures 2-3 per 20 trials
     promoteAcc: 0.75,
     promoteMedian: 20,
     trials: 40
@@ -1156,7 +1175,7 @@ const JITTER_LEVELS = {
     jitterRange: [-10, 10], // ±5-10¢
     probeRate: 0.09, // Raised to ~9%
     probeRange: [-35, 35],
-    anchorRate: 0.06, // 6% anchors (0¢)
+    anchorRate: 0.12, // 12% anchors (0¢) - ensures 2-3 per 20 trials
     promoteAcc: 0.80,
     promoteMedian: 15,
     trials: 40
@@ -1165,7 +1184,7 @@ const JITTER_LEVELS = {
     jitterRange: [-15, 15], // ±5-15¢
     probeRate: 0.10, // Raised to ~10%
     probeRange: [-40, 40],
-    anchorRate: 0.04, // 4% anchors (0¢)
+    anchorRate: 0.10, // 10% anchors (0¢) - ensures 2 per 20 trials
     promoteAcc: 0.90,
     promoteMedian: 10,
     promoteSD: 15,
@@ -1175,7 +1194,7 @@ const JITTER_LEVELS = {
     jitterRange: [-15, 15], // ±5-15¢ (global default)
     probeRate: 0.12, // Raised to ~12% (bounded by global ~10%)
     probeRange: [-40, 40],
-    anchorRate: 0.02, // 2% anchors (0¢)
+    anchorRate: 0.10, // 10% anchors (0¢) - ensures 2 per 20 trials
     demoteAcc: 0.75,
     demoteMedian: 25,
     demoteSD: 30,
@@ -2728,29 +2747,28 @@ async function nextTrial(forceNew=false){
       // Initialize jitter level for this note if needed
       initializeJitterLevel(truePc);
       
-      // Global probe rate limiting (~10%)
-      const globalProbeRate = 0.10;
-      const shouldProbe = Math.random() < globalProbeRate;
+      const level = state.jitterLevels[truePc];
+      const config = JITTER_LEVELS[level];
       
-      if (shouldProbe) {
-        // Check if this should be a boundary probe or 0¢ anchor
-        const level = state.jitterLevels[truePc];
-        const config = JITTER_LEVELS[level];
+      // Ensure 2-3 anchors per 20 trials (10-15% rate) - independent of probes
+      const anchorRate = config.anchorRate || 0.10; // Default 10% if not specified
+      const shouldAnchor = Math.random() < anchorRate;
+      
+      if (shouldAnchor) {
+        isAnchor = true;
+        appliedJitter = 0; // 0¢ anchor
+      } else {
+        // Global probe rate limiting (~10%)
+        const globalProbeRate = 0.10;
+        const shouldProbe = Math.random() < globalProbeRate;
         
-        // Decide between probe and anchor based on rates
-        const totalSpecialRate = config.probeRate + (config.anchorRate || 0);
-        const anchorProbability = (config.anchorRate || 0) / totalSpecialRate;
-        
-        if (Math.random() < anchorProbability) {
-          isAnchor = true;
-          appliedJitter = 0; // 0¢ anchor
-        } else {
+        if (shouldProbe) {
           isProbe = true;
           appliedJitter = calculateJitter(truePc, true); // Boundary probe
+        } else {
+          // Regular jitter
+          appliedJitter = calculateJitter(truePc, false);
         }
-      } else {
-        // Regular jitter
-        appliedJitter = calculateJitter(truePc, false);
       }
       
       // Store jitter info for this trial
@@ -4078,13 +4096,30 @@ function simulateTrial(set, blockNum, trialNum) {
       // Initialize jitter level if needed
       simInitializeJitterLevel(truePc);
       
-      const isProbe = simShouldUseProbe(truePc);
-      const jitter = simCalculateJitter(truePc, isProbe);
+      const level = state.jitterLevels[truePc];
+      const config = JITTER_LEVELS[level];
+      
+      // Use the same anchor/probe logic as real training
+      const anchorRate = config.anchorRate || 0.10;
+      const shouldAnchor = withSimulatedRandom(() => Math.random() < anchorRate);
+      
+      let isProbe = false;
+      let jitter = 0;
+      
+      if (shouldAnchor) {
+        // Anchor trial: 0¢ jitter
+        jitter = 0;
+      } else {
+        // Check for probe
+        isProbe = simShouldUseProbe(truePc);
+        jitter = simCalculateJitter(truePc, isProbe);
+      }
       
       jitterInfo = {
         jitter: jitter,
         isProbe: isProbe,
-        level: state.jitterLevels[truePc]
+        isAnchor: shouldAnchor,
+        level: level
       };
     }
     
@@ -4101,7 +4136,7 @@ function simulateTrial(set, blockNum, trialNum) {
       isOOB: wasOOB,
       detuneCents: Math.round(jitterInfo.jitter * 10) / 10,
       probe: jitterInfo.isProbe,
-      anchor: jitterInfo.jitter === 0 && !wasOOB,
+      anchor: jitterInfo.isAnchor || (jitterInfo.jitter === 0 && !wasOOB),
       ok: response.correct
     };
     
