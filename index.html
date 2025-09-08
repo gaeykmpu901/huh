@@ -5490,6 +5490,17 @@ window.runSimWeek = function(opts = {}) {
           
           if (!state.oobOctaveMirror) state.oobOctaveMirror = [];
           state.oobOctaveMirror.push(mirrorRecord);
+          
+          // Also store in QA format for export
+          const mirrorQARecord = {
+            globalTimeBlockIndex: (day - 1) * dailyBlocks + block,
+            inBounds: {3: blockInBoundsOctaves[3], 4: blockInBoundsOctaves[4], 5: blockInBoundsOctaves[5]},
+            oob: {3: blockOOBOctaves[3], 4: blockOOBOctaves[4], 5: blockOOBOctaves[5]},
+            diff_pp: diffPP
+          };
+          
+          if (!state.qa.octaves.mirror) state.qa.octaves.mirror = [];
+          state.qa.octaves.mirror.push(mirrorQARecord);
         }
         
         // Trigger block boundary logic when globalBlock % 3 === 0 (not local block)
@@ -5614,6 +5625,9 @@ window.runSimWeek = function(opts = {}) {
     });
     
     out.octaveCounts = totalOctaveCounts;
+    
+    // Add mirror data to simulation output
+    out.octaveMirror = state.qa.octaves?.mirror || [];
     
     // Return the required structure
     return out;
@@ -5999,7 +6013,7 @@ window.QA.exportFull = function(opts = {}) {
     octaves: { 
       inBounds: simData ? (simData.octaveCounts?.inBounds || { 3: 0, 4: 0, 5: 0 }) : (state.octaveStats?.inBounds || { 3: 0, 4: 0, 5: 0 }), 
       oob: simData ? (simData.octaveCounts?.oob || { 3: 0, 4: 0, 5: 0 }) : (state.octaveStats?.oob || { 3: 0, 4: 0, 5: 0 }), 
-      mirror: state.qa.octaves.mirror || []
+      mirror: simData ? (simData.octaveMirror || []) : (state.qa.octaves.mirror || [])
     },
     detune: { 
       shares: state.qa.detune.shares || { counts: { anchors: 0, probes: 0, jitter: 0, total: 0 }, pct: {} },
